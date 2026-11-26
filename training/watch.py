@@ -83,7 +83,9 @@ class SlamView:
 
     def __init__(self, layout=None, start=None):
         n = self.N
-        self.free, self.wall, self.door, self.lock = (np.zeros((n, n), np.uint8) for _ in range(4))
+        self.free = np.zeros((n, n), np.uint8)
+        self.segs = set()   # wall pieces as vectors (x0, y0, x1, y1), snapped to 4 map units
+        self.doors = []     # one entry per physical door: [x, y, hits, locked, opened]
         self.path = []
         self.walked = np.zeros((n, n), np.uint8)
         self.now = []
@@ -114,17 +116,32 @@ class SlamView:
         ex, ey = mem.x + np.cos(ang) * d, mem.y + np.sin(ang) * d
         pts = np.rint(self._px(ex, ey)).astype(np.int32)
         cv2.fillPoly(self.free, [pts], 255)  # everything the rays swept this step is seen floor
-        nxt = np.roll(pts, -1, 0)
         gap = np.hypot(np.roll(ex, -1) - ex, np.roll(ey, -1) - ey)
-        same = gap < 0.5 * np.minimum(d, np.roll(d, -1)) + 24.0
-        for t, layer, th in ((1, self.wall, 1), (2, self.door, 3), (3, self.lock, 3)):
+        same = gap < 0.22 * np.minimum(d, np.roll(d, -1)) + 14.0  # stricter than the agent's own rule: no lines drawn across doorways
+        q = lambda v: int(round(float(v) / 4.0)) * 4  # noqa: E731
+        wall = (h == 1) & (d < 1000)
+        for i in np.flatnonzero(wall & np.roll(wall, -1) & same):
+            k = (i + 1) % len(d)
+            seg = (q(ex[i]), q(ey[i]), q(ex[k]), q(ey[k]))
+            if seg[:2] != seg[2:]:
+                self.segs.add(seg)
+        # a door is hit on its front face from one side and its back face from the other: both
+        # belong to the same door, so hits closer than a door's size are merged into one marker
+        for t in (2, 3):
             sel = (h == t) & (d < 1000)
-            for i in np.flatnonzero(sel):
-                a = (int(pts[i][0]), int(pts[i][1]))
-                if sel[(i + 1) % len(d)] and same[i]:
-                    cv2.line(layer, a, (int(nxt[i][0]), int(nxt[i][1])), 255, th)
+            for x, y in zip(ex[sel], ey[sel]):
+                for dr in self.doors:
+                    if np.hypot(dr[0] - x, dr[1] - y) < 110:
+                        dr[0] += (x - dr[0]) / (dr[2] + 1)
+                        dr[1] += (y - dr[1]) / (dr[2] + 1)
+                        dr[2] = min(dr[2] + 1, 400)
+                        dr[3] = dr[3] or t == 3
+                        break
                 else:
-                    cv2.circle(layer, a, th // 2, 255, -1)
+                    self.doors.append([float(x), float(y), 1, t == 3, False])
+        for dr in self.doors:  # walked through it: it is open
+            if np.hypot(dr[0] - mem.x, dr[1] - mem.y) < 44:
+                dr[4] = True
         self.path.append((mem.x, mem.y))
         cv2.circle(self.walked, tuple(int(v) for v in np.rint(self._px(mem.x, mem.y))), 5, 255, -1)
         e = obs["visible_entities"]
@@ -146,10 +163,12 @@ class SlamView:
         ox, oy = int(np.clip(cx - side // 2, 0, self.N - side)), int(np.clip(cy - side // 2, 0, self.N - side))
         sl = (slice(oy, oy + side), slice(ox, ox + side))
         k = size / side
-        img = np.full((side, side, 3), self.BG, np.uint8)
-        img[self.free[sl] > 0] = self.FLOOR
-        img[self.walked[sl] > 0] = (104, 84, 62)  # floor the agent has actually stood on
-        img = cv2.resize(img, (size, size), interpolation=cv2.INTER_NEAREST)
+        img = np.full((size, size, 3), self.BG, np.uint8)
+        # smooth the edge of the explored area instead of showing grid blocks
+        seen = cv2.GaussianBlur(cv2.resize(self.free[sl], (size, size), interpolation=cv2.INTER_LINEAR), (0, 0), 1.6) > 127
+        walked = cv2.GaussianBlur(cv2.resize(self.walked[sl], (size, size), interpolation=cv2.INTER_LINEAR), (0, 0), 2.0) > 110
+        img[seen] = self.FLOOR
+        img[walked & seen] = (104, 84, 62)  # floor the agent has actually stood on
 
         def out(x, y):
             return np.rint((self._px(x, y) - (ox, oy)) * k).astype(np.int32)
@@ -160,11 +179,22 @@ class SlamView:
         if len(self.path) > 1:
             p = np.array(self.path)
             cv2.polylines(img, [out(p[:, 0], p[:, 1])], False, (230, 150, 60), 2, cv2.LINE_AA)
-        for layer, col, grow in ((self.wall, self.WALL, 1), (self.door, self.DOOR, 2), (self.lock, self.LOCK, 2)):
-            m = cv2.resize(layer[sl], (size, size), interpolation=cv2.INTER_AREA if size < side else cv2.INTER_LINEAR) > 150
-            if grow > 1:
-                m = cv2.dilate(m.astype(np.uint8), np.ones((grow, grow), np.uint8)) > 0
-            img[m] = col
+        if self.segs:
+            a = np.array(list(self.segs), np.float64)
+            p0, p1 = out(a[:, 0], a[:, 1]), out(a[:, 2], a[:, 3])
+            cv2.polylines(img, [np.stack([u, w]) for u, w in zip(p0, p1)], False, self.WALL, 2, cv2.LINE_AA)
+        r = max(6, int(30 / self.R * k))
+        for x, y, n, locked, opened in self.doors:
+            if n < 3:
+                continue  # a single stray hit is not a door yet
+            c = out(x, y)
+            c = (int(c[0]), int(c[1]))
+            col = self.LOCK if locked else self.DOOR
+            if opened:
+                cv2.circle(img, c, r, col, 2, cv2.LINE_AA)       # ring: gone through
+            else:
+                cv2.circle(img, c, r, col, -1, cv2.LINE_AA)      # filled: still shut
+                cv2.circle(img, c, r, (0, 0, 0), 1, cv2.LINE_AA)
         for kx, ky in mem.keys.values():
             c = out(kx, ky)
             cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 220, 255), -1, cv2.LINE_AA)
@@ -191,7 +221,7 @@ class SlamView:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.rectangle(img, (0, size - 22), (size, size), (0, 0, 0), -1)
         x = 8
-        for name, col in (("wall", self.WALL), ("door", self.DOOR), ("locked", self.LOCK), ("key", (0, 220, 255)),
+        for name, col in (("wall", self.WALL), ("door", self.DOOR), ("locked door", self.LOCK), ("key", (0, 220, 255)),
                           ("path", (230, 150, 60)), ("seen", self.FLOOR), ("walked", (104, 84, 62)),
                           ("enemy", (40, 40, 255)), ("pickup", (255, 220, 80))) +                 (("real level", (120, 96, 70)),) * bool(self.truth):
             cv2.rectangle(img, (x, size - 16), (x + 10, size - 6), col, -1)
@@ -273,12 +303,8 @@ def main():
     names = ["FWD", "BACK", "SL", "SR", "TL", "TR", "FIRE", "USE", "WPN"]
     for ep, (wad, mapname, tags, L, ticks) in enumerate(levels):
         env = make_env(wad, mapname, episode_ticks=ticks, render_buffers=True)
-        if not a.lowres:
-            for f, v in (("set_render_hud", True), ("set_render_crosshair", True)):
-                try:
-                    getattr(env._game, f)(v)
-                except Exception:
-                    pass
+        # no status bar or engine crosshair: the agent reads this same picture to recognise the exit
+        # pad, and the scorer renders without them. A crosshair is drawn on the displayed copy only.
         if agent is None:
             agent = DoomAgent(env.observation_space, env.action_space, "cpu")
             if a.weights:
@@ -338,6 +364,7 @@ def main():
                      f"keys {int(v[8:14].sum())}  gun swaps {m['wpn_switches']}  secrets {m['secrets']}",
                      "act: " + " ".join(n for n, b in zip(names, act) if b),
                      "EXIT REACHED" if info.get("exit_reached") else ("DEAD" if ps["dead"] else ("TIME UP" if done else ""))]
+            cv2.drawMarker(frame, (W // 2, H // 2), (0, 255, 0), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
             ov = frame.copy()  # stats box on top of the game picture
             cv2.rectangle(ov, (0, 0), (430, 14 + 24 * len(lines)), (0, 0, 0), -1)
             frame = cv2.addWeighted(ov, 0.6, frame, 0.4, 0)
