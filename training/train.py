@@ -38,7 +38,7 @@ from model import DoomNet, load_compatible, split_logits  # noqa: E402
 from sampler import AsyncSampler  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
 
-RND_DIM = 9 * 64 + 53
+RND_DIM = 9 * 64 + 77
 
 
 class RND(nn.Module):
@@ -107,8 +107,9 @@ def main():
     rnd = RND().to(dev)
     # the freshly added parts (exit detector, critics, curiosity predictor) start from nothing and get
     # a ten times larger step than the already trained policy, which is only being fine-tuned
-    fresh = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] in ("eye", "exit_head", "vpriv", "v")]
-    tuned = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] not in ("eye", "exit_head", "vpriv", "v")]
+    FRESH = ("eye", "exit_head", "color_head", "vpriv", "v")
+    fresh = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] in FRESH]
+    tuned = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] not in FRESH]
     opt = torch.optim.Adam([{"params": tuned}, {"params": fresh + list(rnd.pred.parameters()), "lr": a.lr * a.fresh_lr_mult}],
                            lr=a.lr, eps=1e-5)
     rnd_obs, int_stat, ret_stat = RunningStat(RND_DIM), RunningStat(), RunningStat()
@@ -131,6 +132,8 @@ def main():
         eye_ck = torch.load(a.load_eye, map_location=dev)
         net.eye.load_state_dict(eye_ck["eye"])
         net.exit_head.load_state_dict(eye_ck["exit_head"])
+        if "color_head" in eye_ck:
+            net.color_head.load_state_dict(eye_ck["color_head"])
         print(f"exit detector loaded from {a.load_eye}", flush=True)
     stage_start, step0, warm0 = step, step, update
 
@@ -245,6 +248,14 @@ def main():
                 # a pad is in view on about 1% of frames: without the weight the detector just says "never"
                 exit_l = F.binary_cross_entropy_with_logits(ex[:, 0], seen, pos_weight=torch.tensor(20.0, device=dev)) + \
                     (seen * ((ex[:, 1] - aux_b[:, 3]) ** 2 + (ex[:, 2] - aux_b[:, 4]) ** 2)).sum() / seen.sum().clamp(min=1.0)
+                # colour reader: plain classification, colours weighted up because "nothing" dominates
+                cw = torch.tensor([1.0, 12.0, 12.0, 12.0], device=dev)
+                co = net.color_out
+                color_l = F.cross_entropy(co[:, :4], aux_b[:, 5].long(), weight=cw) + F.cross_entropy(co[:, 4:], aux_b[:, 6].long(), weight=cw)
+                exit_l = exit_l + 0.5 * color_l
+                with torch.no_grad():
+                    has = aux_b[:, 5] > 0
+                    lock_right = ((co[:, :4].argmax(1) == aux_b[:, 5].long()) & has).float().sum().item() / max(has.sum().item(), 1)
                 with torch.no_grad():
                     hit = ((ex[:, 0] > 0) == (seen > 0.5)).float().mean().item()
                     recall = (((ex[:, 0] > 0) & (seen > 0.5)).float().sum() / seen.sum().clamp(min=1.0)).item()
@@ -274,6 +285,7 @@ def main():
                 stats["exit_loss"].append(exit_l.item())
                 stats["exit_acc"].append(hit)
                 stats["exit_recall"].append(recall)
+                stats["lock_colour_right"].append(lock_right)
                 stats["kl"].append((LP[:, idx].reshape(-1) - logp).mean().item())
                 stats["clipfrac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
         smp.set_weights(net.state_dict())

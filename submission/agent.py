@@ -18,7 +18,7 @@ WEIGHTS_DIR = SUBMISSION_DIR / "weights"
 if str(SUBMISSION_DIR) not in sys.path:
     sys.path.insert(0, str(SUBMISSION_DIR))
 
-from model import DoomNet, load_compatible, obs_to_torch, split_logits, to_buttons  # noqa: E402
+from model import DoomNet, decode_colors, load_compatible, obs_to_torch, split_logits, to_buttons  # noqa: E402
 from spatial_memory import SpatialMemory  # noqa: E402
 
 
@@ -60,6 +60,7 @@ class DoomAgent:
         ex = self.net.exit_out[0]
         if torch.sigmoid(ex[0]).item() > EXIT_CONFIDENCE:  # the learned detector sees an exit pad: store it
             self.memory.note_exit(float(ex[1].clamp(-1, 1)) * math.radians(45.0), float(ex[2].clamp(0.02, 1.2)) * 1024.0)
+        self.memory.note_colors(*decode_colors(self.net.color_out[0].numpy()))  # colours it recognised
         action = to_buttons(np.array(choice))
         self.last_action = action
         return action

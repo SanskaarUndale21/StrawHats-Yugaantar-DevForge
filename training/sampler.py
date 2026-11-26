@@ -84,10 +84,11 @@ def _actor(wid, k, T, ctl, seed, out_q, shared):
                                           torch.from_numpy(starts)[None])
                     choice, logp = sample(logits)
                     exit_pred = net.exit_out.numpy()
+                    color_pred = net.color_out.numpy()
                 choice = choice.numpy()
                 rew, done, lab = np.zeros(k, np.float32), np.zeros(k, np.float32), []
                 for i, s in enumerate(slots):
-                    f, r, d, ep, a, label = s.step(choice[i], exit_pred[i])
+                    f, r, d, ep, a, label = s.step(choice[i], exit_pred[i], color_pred[i])
                     feats[i], aux[i] = _pack(f), a
                     rew[i], done[i] = r, float(d)
                     lab.append(label)

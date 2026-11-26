@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 53, 32, 12
+RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 77, 32, 12
 PRIV_DIM = 12  # training-only ground truth for the critic (never part of the policy's input)
 HEADS = (3, 3, 3, 2, 2, 2)  # move, strafe, turn, attack, use, weapon
 HIDDEN = 256
@@ -130,6 +130,9 @@ class DoomNet(nn.Module):
         self.pix = PixelEncoder(64)
         self.eye = ExitEye(64)
         self.exit_head = nn.Linear(64, 3)  # [exit pad in view (logit), bearing / 45 deg, range / 1024]
+        # colour reader: 4 logits for the locked door ahead and 4 for the keycard in view
+        # (none / blue / yellow / red). The structured observation never gives these colours.
+        self.color_head = nn.Linear(64, 8)
         self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128 + 64 + 64, HIDDEN), nn.ReLU())
         self.gru = nn.GRU(HIDDEN, HIDDEN)
         self.pi = nn.Linear(HIDDEN + HIDDEN, sum(HEADS))
@@ -148,6 +151,7 @@ class DoomNet(nn.Module):
                        self.vec(o["vec"]), self.pix(o["rgb"])], -1)
         eye = self.eye(o["rgb2"])
         self.exit_out = self.exit_head(eye)  # read by the agent (to remember the exit) and by the side loss
+        self.color_out = self.color_head(eye)
         return self.fuse(torch.cat([e, eye], -1))
 
     def forward(self, o, h, done=None):
@@ -220,6 +224,17 @@ def load_compatible(net: nn.Module, state: dict) -> list:
     own.update(ok)
     net.load_state_dict(own)
     return [k for k in own if k not in ok]
+
+
+def decode_colors(color_logits, confidence=0.7):
+    """Colour-head output for one observation -> (locked-door colour, keycard colour), 0 = not sure."""
+    import numpy as np
+
+    z = np.asarray(color_logits, np.float64).reshape(2, 4)
+    p = np.exp(z - z.max(1, keepdims=True))
+    p /= p.sum(1, keepdims=True)
+    c = p.argmax(1)
+    return tuple(int(ci) if pi[ci] > confidence else 0 for ci, pi in zip(c, p))
 
 
 def obs_to_torch(feats: dict, device) -> dict:

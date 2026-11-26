@@ -342,6 +342,39 @@ class RewardShaper:
         out[:] = (1.0, bearing / math.radians(45), dist / 1024.0)
         return out
 
+    def color_targets(self, obs: dict) -> np.ndarray:
+        """Supervision for the colour reader: [colour of the locked door ahead, colour of the keycard
+        in view], each 0 none, 1 blue, 2 yellow, 3 red."""
+        out = np.zeros(2, np.float32)
+        if self.nav is None:
+            return out
+        ps = self._ps
+        th = math.radians(ps["angle"])
+        code = {"B": 1.0, "Y": 2.0, "R": 3.0}
+        hit, rd = np.asarray(obs["rays"]["hit_type"]), np.asarray(obs["rays"]["distance"])
+        for i in (0, 1, 63, 2, 62, 3, 61):
+            if hit[i] == 3 and rd[i] < 0.6:
+                a = th + i * 2 * math.pi / len(rd)
+                for extra in (8.0, 32.0):
+                    r, c = self.nav.cell(ps["x"] + (rd[i] * 1024.0 + extra) * math.cos(a), ps["y"] + (rd[i] * 1024.0 + extra) * math.sin(a))
+                    if 0 <= r < self.nav.h and 0 <= c < self.nav.w and self.nav.g[r][c] in code:
+                        out[0] = code[self.nav.g[r][c]]
+                        break
+                break
+        e = obs["visible_entities"]
+        m = np.asarray(e["mask"]).astype(bool) & (np.asarray(e["entity_type"]) == 9)
+        f = np.asarray(e["features"], np.float64)
+        m &= f[:, 2] > 0.73
+        if m.any():
+            j = int(np.flatnonzero(m)[np.argmin(f[m, 0])])
+            d = f[j, 0] * 1024.0
+            fwd, left = d * f[j, 2], d * f[j, 1]
+            kx, ky = ps["x"] + math.cos(th) * fwd - math.sin(th) * left, ps["y"] + math.sin(th) * fwd + math.cos(th) * left
+            best = min(self.nav.keys, key=lambda rc: math.hypot(self.nav.center(rc)[0] - kx, self.nav.center(rc)[1] - ky), default=None)
+            if best is not None and math.hypot(self.nav.center(best)[0] - kx, self.nav.center(best)[1] - ky) < 80:
+                out[1] = code[self.nav.keys[best]]
+        return out
+
 
 def aux_targets(obs: dict) -> np.ndarray:
     """Self-supervised targets: [enemy near the crosshair, door/locked door straight ahead]."""

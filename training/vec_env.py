@@ -244,14 +244,18 @@ class _Slot:
         evaluation, and the benchmark fell from 231 to 155 before the policy loss was even on."""
         feats = self.mem.update(obs, buttons)
         feats["priv"] = self.shaper.priv_features()
-        self.exit_t = self.shaper.exit_targets(obs)
+        self.exit_t = np.concatenate([self.shaper.exit_targets(obs), self.shaper.color_targets(obs)])
         return feats
 
-    def step(self, choice, exit_pred=None):
+    def step(self, choice, exit_pred=None, color_pred=None):
         """choice: the learner's head choices (6,). In distill mode the teacher's action is executed
         with probability beta (DAgger). Returns the teacher's label for the state (or -1s).
         exit_pred: the network's exit-detector output for the current observation; a confident
         sighting is stored in the agent's memory, the same rule as in submission/agent.py."""
+        if color_pred is not None:
+            from model import decode_colors
+
+            self.mem.note_colors(*decode_colors(color_pred))
         if exit_pred is not None and exit_pred[0] > EXIT_LOGIT:
             self.mem.note_exit(float(np.clip(exit_pred[1], -1, 1)) * 0.7853981, float(np.clip(exit_pred[2], 0.02, 1.2)) * 1024.0)
         from model import to_buttons

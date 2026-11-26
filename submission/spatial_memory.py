@@ -50,7 +50,7 @@ ENT_KEY = 9
 ENT_ITEMS = (5, 6, 7, 8)  # health, armor, ammo, weapon
 
 RAY_CH = 9
-VEC_DIM = 53
+VEC_DIM = 77
 AMMO_SCALE = np.array([200.0, 50.0, 50.0, 300.0], np.float32)
 
 _RAY_ANG = np.arange(NUM_RAYS) * (2 * math.pi / NUM_RAYS)
@@ -86,6 +86,12 @@ class SpatialMemory:
         self.doors: dict[tuple[int, int], tuple[float, float]] = {}
         self.keys: dict[tuple[int, int], tuple[float, float]] = {}
         self.exits: dict[tuple[int, int], tuple[float, float]] = {}
+        # the observation says "locked door" and "key" but never which colour; the colour comes from
+        # the network's own colour reader (see note_colors) and is remembered here per colour
+        self.lock_col = [dict(), dict(), dict()]  # blue, yellow, red: cell -> position
+        self.key_col = [dict(), dict(), dict()]
+        self._front_lock = None  # where the locked door straight ahead is, if there is one
+        self._front_key = None   # where the nearest keycard in view is, if there is one
 
     # ------------------------------------------------------------------ odometry
     def _integrate(self, action: np.ndarray, vel_fr: np.ndarray) -> None:
@@ -198,6 +204,14 @@ class SpatialMemory:
             for px, py in pts:
                 store[self._cell(px, py)] = (float(px), float(py))
 
+    def note_colors(self, lock_c: int, key_c: int) -> None:
+        """Store the colour (1 blue, 2 yellow, 3 red; 0 = nothing recognised) the network's colour
+        reader assigned to the locked door ahead and to the keycard in view."""
+        if lock_c > 0 and self._front_lock is not None:
+            self.lock_col[lock_c - 1][self._cell(*self._front_lock)] = self._front_lock
+        if key_c > 0 and self._front_key is not None:
+            self.key_col[key_c - 1][self._cell(*self._front_key)] = self._front_key
+
     def note_exit(self, bearing: float, dist: float) -> None:
         """Remember an exit pad seen at `bearing` (radians, left positive) and `dist` (map units)
         from the current pose. The sighting comes from the network's own exit detector (in training
@@ -264,6 +278,8 @@ class SpatialMemory:
             for c in set(zip(fx[was_door].tolist(), fy[was_door].tolist())):
                 self.doors.pop(c, None)
                 self.locks.pop(c, None)
+                for dcol in self.lock_col:
+                    dcol.pop(c, None)
         # obstacles at the hit point
         hx, hy = self.x + ca * (dunits + 8.0), self.y + sa * (dunits + 8.0)
         for t, ch in ((RAY_WALL, C_WALL), (RAY_DOOR, C_DOOR), (RAY_LOCK, C_LOCK)):
@@ -275,6 +291,9 @@ class SpatialMemory:
                     for px, py in zip(hx[sel], hy[sel]):
                         store[self._cell(px, py)] = (px, py)
 
+        fr = [i for i in (0, 1, 63, 2, 62, 3, 61) if hit[i] == RAY_LOCK and dist[i] < 0.6]
+        self._front_lock = (float(hx[fr[0]]), float(hy[fr[0]])) if fr else None
+        self._front_key = None
         # entities: keys and pickups projected into the map
         ents = obs["visible_entities"]
         mask = np.asarray(ents["mask"]).astype(bool)
@@ -292,6 +311,10 @@ class SpatialMemory:
                 self._paint(C_KEY, wx[k], wy[k])
                 for px, py in zip(wx[k], wy[k]):
                     self.keys[self._cell(px, py)] = (px, py)
+                infov = k & (f[:, 2] > 0.73)  # within about 43 degrees of straight ahead
+                if infov.any():
+                    j = int(np.flatnonzero(infov)[np.argmin(d[infov])])
+                    self._front_key = (float(wx[j]), float(wy[j]))
             it = np.isin(t, ENT_ITEMS)
             if it.any():
                 self._paint(C_ITEM, wx[it], wy[it])
@@ -307,6 +330,10 @@ class SpatialMemory:
         self.fine[C_ITEM, cx, cy] = 0.0
         self.fine[C_KEY, cx, cy] = 0.0
         self.keys.pop((cx, cy), None)
+        for c3 in range(3):
+            self.key_col[c3].pop((cx, cy), None)
+            if vit[8 + c3] > 0 or vit[11 + c3] > 0:
+                self.key_col[c3].clear()  # holding this colour: its keycards are no longer of interest
         gx, gy = int(math.floor(self.x / COARSE)) % G_COARSE, int(math.floor(self.y / COARSE)) % G_COARSE
         self.coarse[C_VISIT, gx, gy] += 1.0
         if any(vit[8:14] > 0):
@@ -393,6 +420,7 @@ class SpatialMemory:
             [min(self.step / 1050.0, 1.0), min(self.since_new / 100.0, 1.0), min(self.n_cells / 300.0, 1.0),
              float(any(vit[8:14] > 0))],
             self._pointer(self.exits),
+            *[p for c3 in range(3) for p in (self._pointer(self.lock_col[c3]), self._pointer(self.key_col[c3]))],
         ]).astype(np.float32)
         assert vec.shape[0] == VEC_DIM, vec.shape
 
