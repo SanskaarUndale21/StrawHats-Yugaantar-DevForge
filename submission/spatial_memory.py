@@ -185,6 +185,17 @@ class SpatialMemory:
     def _cell(self, wx: float, wy: float) -> tuple[int, int]:
         return int(math.floor(wx / FINE)) % G_FINE, int(math.floor(wy / FINE)) % G_FINE
 
+    def reveal(self, free, wall, door, lock, key) -> None:
+        """Training curriculum only: start an episode with the level already drawn in memory
+        ("known map"). Each argument is an (n, 2) array of points in the memory frame. Later
+        episodes start empty and the agent has to build the same picture from its own rays."""
+        for ch, pts in ((C_FREE, free), (C_WALL, wall), (C_DOOR, door), (C_LOCK, lock), (C_KEY, key)):
+            if len(pts):
+                self._paint(ch, pts[:, 0], pts[:, 1])
+        for store, pts in ((self.doors, door), (self.locks, lock), (self.keys, key)):
+            for px, py in pts:
+                store[self._cell(px, py)] = (float(px), float(py))
+
     # ------------------------------------------------------------------ main entry
     def update(self, obs: dict, action: np.ndarray | None) -> dict:
         """Integrate one observation (after `action` was executed). Returns policy features."""

@@ -62,6 +62,45 @@ MAPS_PER_WAD = 32
 GEN_PER_WAD = 29  # MAP01..MAP29 generated, MAP30..MAP32 hand-made fixtures
 
 
+def reveal_layout(mem, L, ps) -> None:
+    """Draw the generated level into the agent's memory, in its own frame (origin and heading at spawn)."""
+    import math
+
+    from mapgen import CELL, KEYS
+
+    key_types = {v[0] for v in KEYS.values()}
+    sub = np.array([(dx, dy) for dx in (-21.0, 0.0, 21.0) for dy in (-21.0, 0.0, 21.0)])
+    out = {k: [] for k in ("free", "wall", "door", "lock", "key")}
+    for r in range(L.h):
+        for c in range(L.w):
+            ch = L.g[r][c]
+            ctr = np.array([c * CELL + CELL / 2, -(r + 1) * CELL + CELL / 2])
+            if ch == "#":
+                near = any(0 <= r + dr < L.h and 0 <= c + dc < L.w and L.g[r + dr][c + dc] != "#"
+                           for dr in (-1, 0, 1) for dc in (-1, 0, 1))
+                if near:
+                    out["wall"].append(ctr + sub)
+            elif ch == "D":
+                out["door"].append(ctr[None])
+            elif ch in "BYR":
+                out["lock"].append(ctr[None])
+            else:
+                out["free"].append(ctr + sub)
+    for t, r, c, _ in L.things:
+        if t in key_types:
+            out["key"].append(np.array([[c * CELL + CELL / 2, -(r + 1) * CELL + CELL / 2]]))
+    a0 = math.radians(ps["angle"])
+    c0, s0 = math.cos(a0), math.sin(a0)
+
+    def to_mem(pts):
+        if not pts:
+            return np.zeros((0, 2))
+        w = np.concatenate(pts) - np.array([ps["x"], ps["y"]])
+        return np.stack([c0 * w[:, 0] + s0 * w[:, 1], -s0 * w[:, 0] + c0 * w[:, 1]], 1)
+
+    mem.reveal(*(to_mem(out[k]) for k in ("free", "wall", "door", "lock", "key")))
+
+
 class _Slot:
     """One environment. Levels live in a 32-map PWAD; switching maps inside the running engine costs
     ~30 ms, while creating a new DoomGame costs ~1 s, so a fresh WAD is only built every few dozen
@@ -182,6 +221,10 @@ class _Slot:
             from teacher import Teacher
 
             self.teacher = Teacher(self.layout, seed=self.rng.randrange(1 << 30))
+            # known-map curriculum: early in distillation (teacher mostly driving) the level is
+            # already drawn in memory; it fades out so the later part is all unknown maps
+            if int(self.mode_val.value) == 2 and self.rng.random() < (float(self.beta_val.value) - 0.3) / 0.5:
+                reveal_layout(self.mem, self.layout, self.cur.privileged_state())
         return obs, self.mem.update(obs, None)
 
     def step(self, choice):
