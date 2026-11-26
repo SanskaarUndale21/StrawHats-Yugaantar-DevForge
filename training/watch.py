@@ -29,6 +29,7 @@ from agent import DoomAgent  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
 
 PANEL = 600
+GUNS = {1: "Fist", 2: "Pistol", 3: "Shotgun", 4: "Chaingun", 5: "Rocket launcher", 6: "Plasma rifle", 7: "BFG"}
 
 
 def _hires(width_res="RES_800X600"):
@@ -308,6 +309,9 @@ def main():
     if not a.lowres:
         _hires()
     from metrics import EpisodeMetrics
+    import vizdoom as _vd
+
+    GV = _vd.GameVariable
 
     total = "" if a.live else f"/{len(levels)}"
     live_mtime, live_step = 0.0, "?"
@@ -373,7 +377,10 @@ def main():
             pressed = [n for n, on in zip(names, act) if on]
             result = "EXIT REACHED" if info.get("exit_reached") else ("DIED" if ps["dead"] else ("TIME RAN OUT" if done else "PLAYING"))
             lines = [f"Level: {' '.join(tags).title()}    Game {ep + 1}{total}    Step {t}" + (f"    Training step {live_step}" if a.live else ""),
+                     f"Time left: {max(0, 100 - 100 * 4 * t // max(ticks, 1))}%   (decision {t} of {ticks // 4})",
                      f"Health: {v[0]:.0f}    Armor: {v[1]:.0f}    Ammo: {v[3]:.0f}",
+                     f"Gun in hand: {GUNS.get(int(v[2]), '?')}    Owns: " + ", ".join(
+                         GUNS[i] for i in range(1, 8) if env._game.get_game_variable(getattr(GV, f"WEAPON{i}")) > 0),
                      f"Enemies killed: {ps['kills']} / {m['monsters']}    Aim accuracy: {aim} ({m['shots']} shots)",
                      f"Rooms explored: {rooms}    Rooms cleared: {m['rooms_cleared']} / {m['rooms_hostile']}",
                      f"Keycards held: {int(v[8:14].sum())}    Weapon swaps: {m['wpn_switches']}    Secrets found: {m['secrets']}",
