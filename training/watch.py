@@ -73,38 +73,22 @@ def memory_view(mem, size=PANEL):
 
 
 class SlamView:
-    """The map the agent has built so far, drawn north-up from nothing but its own pose estimate and
-    its own ray hits. Explored floor is filled in, walls are joined into lines, doors are green,
-    locked doors red, keys yellow, the path it walked blue. Unexplored space stays black: nothing is
-    shown that the agent has not seen itself (pass a layout only for debugging, see --truth)."""
+    """Occupancy-grid SLAM display, the standard robotics picture: every cell holds the log-odds of
+    being a wall, updated from each scan (cells a ray passed through become more free, the cell it
+    ended in more occupied). Grey = never observed, white = free, black = occupied. On top: the
+    current laser scan (red), the trajectory (blue) and the pose (arrow). Everything comes from the
+    agent's own pose estimate and ray hits; nothing from the real level."""
 
-    R, N = 8.0, 1024  # map units per pixel, canvas side (covers 8192 units around the start)
-    BG, FLOOR, WALL, DOOR, LOCK = (20, 18, 16), (74, 66, 58), (245, 245, 245), (60, 210, 60), (50, 50, 235)
+    R, N = 8.0, 1024            # map units per cell, cells per side (8192 units around the start)
+    L_FREE, L_OCC, L_MAX = -0.35, 0.9, 4.0
+    SUB = 4                     # rays are 5.6 degrees apart; neighbours on one surface are interpolated
 
     def __init__(self, layout=None, start=None):
-        n = self.N
-        self.free = np.zeros((n, n), np.uint8)
-        self.segs = set()   # wall pieces as vectors (x0, y0, x1, y1), snapped to 4 map units
-        self.doors = []     # one entry per physical door: [x, y, hits, locked, opened]
+        self.lo = np.zeros((self.N, self.N), np.float32)   # log-odds, 0 = unknown
         self.path = []
-        self.walked = np.zeros((n, n), np.uint8)
-        self.now = []
-        self.truth = []
-        if layout is not None and start is not None:  # outline of the real level, in the agent's frame
-            x0, y0, a0 = start
-            c0, s0 = np.cos(a0), np.sin(a0)
-            g = layout.g
-            for r in range(layout.h):
-                for c in range(layout.w):
-                    if g[r][c] == "#":
-                        continue
-                    X0, X1, Y0, Y1 = c * 64.0, (c + 1) * 64.0, -(r + 1) * 64.0, -r * 64.0
-                    for (dr, dc), seg in (((-1, 0), (X0, Y1, X1, Y1)), ((1, 0), (X0, Y0, X1, Y0)),
-                                          ((0, -1), (X0, Y0, X0, Y1)), ((0, 1), (X1, Y0, X1, Y1))):
-                        rr, cc = r + dr, c + dc
-                        if not (0 <= rr < layout.h and 0 <= cc < layout.w) or g[rr][cc] == "#":
-                            w = np.array([[seg[0] - x0, seg[1] - y0], [seg[2] - x0, seg[3] - y0]])
-                            self.truth.append(np.stack([c0 * w[:, 0] + s0 * w[:, 1], -s0 * w[:, 0] + c0 * w[:, 1]], 1))
+        self.doors = []          # one entry per physical door: [x, y, hits, locked, opened]
+        self.scan = np.zeros((0, 2))
+        self.steps = 0
 
     def _px(self, x, y):
         return np.stack([self.N / 2 + np.asarray(x) / self.R, self.N / 2 - np.asarray(y) / self.R], -1)
@@ -112,22 +96,37 @@ class SlamView:
     def add(self, mem, obs):
         d = np.asarray(obs["rays"]["distance"], np.float64) * 1024.0
         h = np.asarray(obs["rays"]["hit_type"])
-        ang = mem.th + np.arange(len(d)) * (2 * np.pi / len(d))
+        n = len(d)
+        ang = mem.th + np.arange(n) * (2 * np.pi / n)
         ex, ey = mem.x + np.cos(ang) * d, mem.y + np.sin(ang) * d
         pts = np.rint(self._px(ex, ey)).astype(np.int32)
-        cv2.fillPoly(self.free, [pts], 255)  # everything the rays swept this step is seen floor
+        x0, y0 = np.maximum(pts.min(0) - 2, 0)
+        x1, y1 = np.minimum(pts.max(0) + 3, self.N)
+        if x1 <= x0 or y1 <= y0:
+            return
+        loc = pts - (x0, y0)
+        free = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        cv2.fillPoly(free, [loc], 1)                     # the area swept by this scan
+        occ = np.zeros_like(free)
+        static = (h >= 1) & (h <= 3) & (d < 1000)
         gap = np.hypot(np.roll(ex, -1) - ex, np.roll(ey, -1) - ey)
-        same = gap < 0.22 * np.minimum(d, np.roll(d, -1)) + 14.0  # stricter than the agent's own rule: no lines drawn across doorways
-        q = lambda v: int(round(float(v) / 4.0)) * 4  # noqa: E731
-        wall = (h == 1) & (d < 1000)
-        for i in np.flatnonzero(wall & np.roll(wall, -1) & same):
-            k = (i + 1) % len(d)
-            seg = (q(ex[i]), q(ey[i]), q(ex[k]), q(ey[k]))
-            if seg[:2] != seg[2:]:
-                self.segs.add(seg)
-        # a door is hit on its front face from one side and its back face from the other: both
-        # belong to the same door, so hits closer than a door's size are merged into one marker
-        for t in (2, 3):
+        same = gap < 0.22 * np.minimum(d, np.roll(d, -1)) + 14.0
+        for i in np.flatnonzero(static):
+            a = (int(loc[i][0]), int(loc[i][1]))
+            k = (i + 1) % n
+            if static[k] and same[i]:
+                cv2.line(occ, a, (int(loc[k][0]), int(loc[k][1])), 1, 1)   # same surface: fill between hits
+            else:
+                occ[min(max(a[1], 0), occ.shape[0] - 1), min(max(a[0], 0), occ.shape[1] - 1)] = 1
+        roi = self.lo[y0:y1, x0:x1]
+        roi += self.L_FREE * ((free > 0) & (occ == 0))
+        roi += self.L_OCC * (occ > 0)
+        np.clip(roi, -self.L_MAX, self.L_MAX, out=roi)
+
+        self.scan = np.stack([ex[h > 0], ey[h > 0]], 1)
+        self.path.append((mem.x, mem.y))
+        self.steps += 1
+        for t in (2, 3):                                  # both faces of a door are one door
             sel = (h == t) & (d < 1000)
             for x, y in zip(ex[sel], ey[sel]):
                 for dr in self.doors:
@@ -139,94 +138,83 @@ class SlamView:
                         break
                 else:
                     self.doors.append([float(x), float(y), 1, t == 3, False])
-        for dr in self.doors:  # walked through it: it is open
+        for dr in self.doors:
             if np.hypot(dr[0] - mem.x, dr[1] - mem.y) < 44:
                 dr[4] = True
-        self.path.append((mem.x, mem.y))
-        cv2.circle(self.walked, tuple(int(v) for v in np.rint(self._px(mem.x, mem.y))), 5, 255, -1)
-        e = obs["visible_entities"]
-        m = np.asarray(e["mask"]).astype(bool)
-        f = np.asarray(e["features"], np.float64)[m]
-        t = np.asarray(e["entity_type"])[m]
-        dd = f[:, 0] * 1024.0
-        fx, fy = dd * f[:, 2], dd * f[:, 1]  # forward, left
-        c, s_ = np.cos(mem.th), np.sin(mem.th)
-        self.now = [(int(k), mem.x + c * a - s_ * b, mem.y + s_ * a + c * b) for k, a, b in zip(t, fx, fy)]
 
     def render(self, mem, size=PANEL):
-        ys, xs = np.nonzero(self.free)
+        known = np.abs(self.lo) > 0.2
+        ys, xs = np.nonzero(known)
         if len(xs) == 0:
-            return np.full((size, size, 3), self.BG, np.uint8)
+            return np.full((size, size, 3), 205, np.uint8)
         x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
-        side = int(max(x1 - x0, y1 - y0, 160) + 28)
+        side = int(max(x1 - x0, y1 - y0, 150) + 24)
         cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
         ox, oy = int(np.clip(cx - side // 2, 0, self.N - side)), int(np.clip(cy - side // 2, 0, self.N - side))
-        sl = (slice(oy, oy + side), slice(ox, ox + side))
+        lo = self.lo[oy:oy + side, ox:ox + side]
         k = size / side
-        img = np.full((size, size, 3), self.BG, np.uint8)
-        # smooth the edge of the explored area instead of showing grid blocks
-        seen = cv2.GaussianBlur(cv2.resize(self.free[sl], (size, size), interpolation=cv2.INTER_LINEAR), (0, 0), 1.6) > 127
-        walked = cv2.GaussianBlur(cv2.resize(self.walked[sl], (size, size), interpolation=cv2.INTER_LINEAR), (0, 0), 2.0) > 110
-        img[seen] = self.FLOOR
-        img[walked & seen] = (104, 84, 62)  # floor the agent has actually stood on
+        # log-odds -> grey: unknown 205, free up to 254, occupied down to 0 (the usual map colours)
+        t = np.clip(lo / 2.0, -1.0, 1.0)
+        g = np.where(t < 0, 205 + (-t) * 49, 205 * (1 - t)).astype(np.uint8)
+        img = cv2.cvtColor(cv2.resize(g, (size, size), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
 
         def out(x, y):
             return np.rint((self._px(x, y) - (ox, oy)) * k).astype(np.int32)
 
-        for seg in self.truth:  # the real level, faint
-            a, b = out(seg[:, 0], seg[:, 1])
-            cv2.line(img, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), (120, 96, 70), 1, cv2.LINE_AA)
+        step = 256.0                                       # metric grid, every 256 map units
+        gx0 = (ox - self.N / 2) * self.R
+        gy1 = (self.N / 2 - oy) * self.R
+        for v in np.arange(np.ceil(gx0 / step) * step, gx0 + side * self.R, step):
+            X = int((v - gx0) / self.R * k)
+            cv2.line(img, (X, 0), (X, size), (188, 188, 188), 1)
+        for v in np.arange(np.floor(gy1 / step) * step, gy1 - side * self.R, -step):
+            Y = int((gy1 - v) / self.R * k)
+            cv2.line(img, (0, Y), (size, Y), (188, 188, 188), 1)
         if len(self.path) > 1:
             p = np.array(self.path)
-            cv2.polylines(img, [out(p[:, 0], p[:, 1])], False, (230, 150, 60), 2, cv2.LINE_AA)
-        if self.segs:
-            a = np.array(list(self.segs), np.float64)
-            p0, p1 = out(a[:, 0], a[:, 1]), out(a[:, 2], a[:, 3])
-            cv2.polylines(img, [np.stack([u, w]) for u, w in zip(p0, p1)], False, self.WALL, 2, cv2.LINE_AA)
-        r = max(6, int(30 / self.R * k))
+            cv2.polylines(img, [out(p[:, 0], p[:, 1])], False, (200, 90, 0), 1, cv2.LINE_AA)
+        c = out(mem.x, mem.y)
+        c = (int(c[0]), int(c[1]))
+        if len(self.scan):                                 # the current scan: beams and hit points
+            q = out(self.scan[:, 0], self.scan[:, 1])
+            ov = img.copy()
+            for a in q:
+                cv2.line(ov, c, (int(a[0]), int(a[1])), (60, 60, 255), 1, cv2.LINE_AA)
+            img = cv2.addWeighted(ov, 0.18, img, 0.82, 0)
+            for a in q:
+                cv2.circle(img, (int(a[0]), int(a[1])), 2, (0, 0, 230), -1, cv2.LINE_AA)
         for x, y, n, locked, opened in self.doors:
             if n < 3:
-                continue  # a single stray hit is not a door yet
-            c = out(x, y)
-            c = (int(c[0]), int(c[1]))
-            col = self.LOCK if locked else self.DOOR
-            if opened:
-                cv2.circle(img, c, r, col, 2, cv2.LINE_AA)       # ring: gone through
-            else:
-                cv2.circle(img, c, r, col, -1, cv2.LINE_AA)      # filled: still shut
-                cv2.circle(img, c, r, (0, 0, 0), 1, cv2.LINE_AA)
+                continue
+            a = out(x, y)
+            col = (0, 0, 200) if locked else (0, 150, 0)
+            cv2.rectangle(img, (int(a[0]) - 5, int(a[1]) - 5), (int(a[0]) + 5, int(a[1]) + 5), col, 1 if opened else -1)
         for kx, ky in mem.keys.values():
-            c = out(kx, ky)
-            cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 220, 255), -1, cv2.LINE_AA)
-            cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 0, 0), 1, cv2.LINE_AA)
-        for k, ex, ey in self.now:  # what it can see this instant
-            q = out(ex, ey)
-            q = (int(q[0]), int(q[1]))
-            if k in (1, 2, 3):
-                cv2.drawMarker(img, q, (40, 40, 255), cv2.MARKER_TRIANGLE_UP, 12, 2, cv2.LINE_AA)
-            elif k in (5, 6, 7, 8):
-                cv2.circle(img, q, 3, (255, 220, 80), -1, cv2.LINE_AA)
-        # the agent: a field-of-view wedge and an arrow
-        c = out(mem.x, mem.y)
-        fov = [out(mem.x + 260 * np.cos(mem.th + a), mem.y + 260 * np.sin(mem.th + a)) for a in np.linspace(-0.785, 0.785, 9)]
-        ov = img.copy()
-        cv2.fillPoly(ov, [np.array([c] + fov, np.int32)], (0, 200, 255))
-        img = cv2.addWeighted(ov, 0.22, img, 0.78, 0)
-        tip = out(mem.x + 18 / k * self.R * np.cos(mem.th), mem.y + 18 / k * self.R * np.sin(mem.th))
-        cv2.arrowedLine(img, (int(c[0]), int(c[1])), (int(tip[0]), int(tip[1])), (0, 140, 255), 3, cv2.LINE_AA, tipLength=0.5)
-        cv2.circle(img, (int(c[0]), int(c[1])), 5, (0, 140, 255), -1, cv2.LINE_AA)
-        # title and legend
-        cv2.rectangle(img, (0, 0), (size, 22), (0, 0, 0), -1)
-        cv2.putText(img, "MAP BUILT BY THE AGENT (from its own position estimate)", (8, 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.rectangle(img, (0, size - 22), (size, size), (0, 0, 0), -1)
-        x = 8
-        for name, col in (("wall", self.WALL), ("door", self.DOOR), ("locked door", self.LOCK), ("key", (0, 220, 255)),
-                          ("path", (230, 150, 60)), ("seen", self.FLOOR), ("walked", (104, 84, 62)),
-                          ("enemy", (40, 40, 255)), ("pickup", (255, 220, 80))) +                 (("real level", (120, 96, 70)),) * bool(self.truth):
-            cv2.rectangle(img, (x, size - 16), (x + 10, size - 6), col, -1)
-            cv2.putText(img, name, (x + 14, size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA)
-            x += 22 + cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0][0]
+            a = out(kx, ky)
+            cv2.drawMarker(img, (int(a[0]), int(a[1])), (0, 170, 230), cv2.MARKER_DIAMOND, 10, 2, cv2.LINE_AA)
+        # pose: heading triangle
+        th = mem.th
+        tri = np.array([[14 * np.cos(th), -14 * np.sin(th)], [9 * np.cos(th + 2.5), -9 * np.sin(th + 2.5)],
+                        [9 * np.cos(th - 2.5), -9 * np.sin(th - 2.5)]]) + c
+        cv2.fillPoly(img, [np.rint(tri).astype(np.int32)], (0, 0, 255), cv2.LINE_AA)
+        cv2.polylines(img, [np.rint(tri).astype(np.int32)], True, (0, 0, 0), 1, cv2.LINE_AA)
+        # header, scale bar, legend
+        cv2.rectangle(img, (0, 0), (size, 20), (40, 40, 40), -1)
+        cells = int(known.sum())
+        cv2.putText(img, f"occupancy grid  {self.R:.0f} u/cell  scans {self.steps}  known {cells} cells  "
+                         f"pose ({mem.x:.0f}, {mem.y:.0f}, {np.degrees(mem.th) % 360:.0f} deg)", (6, 14),
+                    cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
+        bar = int(256 / self.R * k)
+        cv2.rectangle(img, (0, size - 20), (size, size), (40, 40, 40), -1)
+        cv2.line(img, (8, size - 10), (8 + bar, size - 10), (255, 255, 255), 2)
+        cv2.putText(img, "256 u", (14 + bar, size - 5), cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
+        x = 70 + bar
+        for name, col in (("free", (254, 254, 254)), ("occupied", (0, 0, 0)), ("unknown", (205, 205, 205)),
+                          ("scan", (0, 0, 230)), ("path", (200, 90, 0)), ("door", (0, 150, 0)), ("locked", (0, 0, 200))):
+            cv2.rectangle(img, (x, size - 15), (x + 9, size - 6), col, -1)
+            cv2.rectangle(img, (x, size - 15), (x + 9, size - 6), (120, 120, 120), 1)
+            cv2.putText(img, name, (x + 13, size - 5), cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
+            x += 20 + cv2.getTextSize(name, cv2.FONT_HERSHEY_PLAIN, 0.9, 1)[0][0]
         return img
 
 
