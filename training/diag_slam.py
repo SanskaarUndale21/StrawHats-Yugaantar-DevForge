@@ -111,12 +111,12 @@ def main():
         res = [r for r in pool.map(run, jobs, chunksize=1) if r]
     for r in sorted(res, key=lambda r: -r["drift_end"])[:8]:
         print("  worst: seed {seed} stage {stage} steps {steps}  drift end {drift_end:.0f} max {drift_max:.0f}  "
-              "heading end {head_end:.1f} max {head_max:.1f} deg  walls right {wall_ok:.2f} free right {free_ok:.2f}".format(**r))
+              "heading end {head_end:.1f} max {head_max:.1f} deg  free right {free_ok:.2f}".format(**r))
     M = lambda k: float(np.nanmean([r[k] for r in res]))  # noqa: E731
     P = lambda k, q: float(np.nanpercentile([r[k] for r in res], q))  # noqa: E731
     print(f"n={len(res)}  steps {M('steps'):.0f}  drift avg over game {M('drift_mean'):.0f}  p95 {M('drift_p95'):.0f}  end mean {M('drift_end'):.0f} p90 {P('drift_end', 90):.0f} units "
           f"(1 map cell = 64)  heading end mean {M('head_end'):.1f} p90 {P('head_end', 90):.1f} deg  "
-          f"walls right {100 * M('wall_ok'):.0f}%  free right {100 * M('free_ok'):.0f}%")
+          f"heading err >3 deg in {sum(r['head_max'] > 3 for r in res)} games  free cells right {100 * M('free_ok'):.0f}%")
 
 
 if __name__ == "__main__":

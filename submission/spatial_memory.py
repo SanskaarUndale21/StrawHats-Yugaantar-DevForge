@@ -32,6 +32,7 @@ DEAD_TICS = 7  # the engine ignores input for the first 7 tics of an episode (me
 # contact correction: while touching a wall or a monster the engine still reports velocity, so the
 # step is re-estimated by sliding this scan onto the previous one (point-to-line fit)
 CONTACT = 28.0   # map units; the player radius is 16
+MELEE_RANGE = 110.0
 FIT_PRIOR = 1.0  # weight of the odometry guess; it decides the direction the walls leave free
 
 FINE, COARSE = 64.0, 256.0
@@ -74,6 +75,7 @@ class SpatialMemory:
         self.pscan = None
         self.ppos = (0.0, 0.0)
         self.pcontact = False
+        self.pweapon = 0
         self.prev_vel = np.zeros(2)
         self.prev_action = np.zeros(9, np.float32)
         self.step = 0
@@ -134,6 +136,31 @@ class SpatialMemory:
             return d_odo
         return d
 
+    def _refit_heading(self, r: np.ndarray, ang: np.ndarray, d: np.ndarray) -> float:
+        """Heading change (radians) that best lays this scan onto the previous one; 0.0 if unsure."""
+        A, AB, _, L2 = self.pscan
+        if len(A) < 6 or len(r) < 12:
+            return 0.0
+
+        def cost(dths):
+            a = ang[None, :] + dths[:, None]
+            pts = np.stack([np.cos(a) * r[None] + d[0], np.sin(a) * r[None] + d[1]], -1)  # (K, n, 2)
+            rel = pts[:, :, None, :] - A[None, None]
+            t = np.clip((rel * AB[None, None]).sum(3) / L2[None, None], 0.0, 1.0)
+            diff = rel - t[..., None] * AB[None, None]
+            return np.minimum(np.hypot(diff[..., 0], diff[..., 1]).min(2), 32.0).mean(1)
+
+        coarse = np.radians(np.arange(-90.0, 90.1, 1.5))
+        c = cost(coarse)
+        best = coarse[int(np.argmin(c))]
+        fine = best + np.radians(np.arange(-1.5, 1.51, 0.25))
+        cf = cost(fine)
+        k = int(np.argmin(cf))
+        c0 = float(cost(np.zeros(1))[0])
+        if abs(fine[k]) < math.radians(0.6) or cf[k] > 6.0 or cf[k] > 0.5 * c0:
+            return 0.0
+        return float(fine[k])
+
     @staticmethod
     def _segments(ex, ey, static, dunits):
         """Join neighbouring wall hits that lie on the same wall (no depth jump) into segments."""
@@ -175,6 +202,15 @@ class SpatialMemory:
         dunits = dist.astype(np.float64) * RAY_RANGE
 
         static = ((hit == RAY_WALL) | (hit == RAY_DOOR) | (hit == RAY_LOCK)) & (dist < 0.97)
+        # a melee hit (fist, chainsaw) snaps the player's view onto the target: re-find the heading
+        melee = int(vit[2]) == 1 or self.pweapon == 1
+        self.pweapon = int(vit[2])
+        if melee and self.pscan is not None and bool((dunits[hit == RAY_ENEMY] < MELEE_RANGE).any()):
+            dth = self._refit_heading(dunits[static], ang[static], np.array([self.x - self.ppos[0], self.y - self.ppos[1]]))
+            if dth:
+                self.th = (self.th + dth) % (2 * math.pi)
+                ang = self.th + _RAY_ANG
+                ca, sa = np.cos(ang), np.sin(ang)
         ex, ey = ca * dunits, sa * dunits
         contact = bool((dunits[(hit >= RAY_WALL) & (hit <= RAY_ENEMY)] < CONTACT).any())
         if self.pscan is not None and (contact or self.pcontact):
