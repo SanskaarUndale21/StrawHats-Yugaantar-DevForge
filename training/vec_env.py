@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
 FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb", "rgb2", "priv")
-EXIT_LOGIT = 0.405  # sigmoid^-1(0.6): the confidence at which a sighting is remembered (agent.EXIT_CONFIDENCE)
+EXIT_LOGIT = 2.197  # sigmoid^-1(0.9): the confidence at which a sighting is remembered (agent.EXIT_CONFIDENCE)
 
 
 def _hires_timer():

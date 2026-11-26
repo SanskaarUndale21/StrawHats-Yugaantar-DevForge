@@ -25,7 +25,9 @@ from spatial_memory import SpatialMemory  # noqa: E402
 # Sampling temperature, chosen on 112 held-out levels with the same weights: 1.0 scored 190 with 23
 # left-right turn reversals per 100 steps, 0.35 scored 218 with 11 (the scripted teacher: 9).
 TEMPERATURE = 0.35
-EXIT_CONFIDENCE = 0.6
+# measured on unseen levels after pre-training: above 0.9, 89% of the detector's sightings are real
+# (above 0.6 only 69%), and a phantom exit in memory misleads the agent
+EXIT_CONFIDENCE = 0.9
 
 
 class DoomAgent:

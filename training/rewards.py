@@ -119,12 +119,15 @@ class RewardShaper:
     # The scorer pays for the exit most, but also for kills, new areas, keycards and doors, and the
     # episode ends at the exit; its time bonus is "small". So the time bonus here is small too and new
     # ground pays more than before: leaving with enemies alive and rooms unseen must not be the best deal.
-    W = dict(explore=0.1, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
-             exit=12.0, exit_health=3.0, exit_time=1.0, death=4.5, step=0.002, use_spam=0.003,
+    W = dict(explore=0.1, kill=1.5, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
+             exit=12.0, exit_health=3.0, exit_time=1.0, death=4.5, step=0.004, use_spam=0.003,
              # survival (it died in a third to a half of gauntlets): damage and death cost more, and
              # health picked up while hurt pays per point regained
              heal=0.01,
-             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
+             # aim and finishing the fight: the promoted policy hits with 74-77% of its shots and
+             # kills 43% of the monsters (the teacher: 84% and 77%), so a hit, a miss and a kill each
+             # weigh three times / 1.5 times what they did; every step costs twice as much (speed)
+             hit=0.15, miss=0.06, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
              # walking properly: reversing a turn or forward/back costs, and so does standing around
              # (measured on the copied policy: 12 left-right and 6.7 forward-back reversals per 100
              # steps, idle on 26-29% of steps)
