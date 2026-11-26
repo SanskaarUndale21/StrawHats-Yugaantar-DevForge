@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT / "training"))
 
 TIER_W = {1: 1.0, 2: 1.5, 3: 2.0, 4: 3.0}
 TIER_KIND = {1: "combat", 2: "explore", 3: "keys", 4: "gauntlet"}
-EVAL_SEED_BASE = 900_000_000  # far away from anything the training RNGs produce
+EVAL_SEED_BASE = int(os.environ.get("DOOM_EVAL_SEED", 900_000_000))  # far from anything the training RNGs produce
 
 
 def level_list(per_tier: int, freedoom: int):
@@ -173,7 +173,10 @@ def main():
     ap.add_argument("--freedoom", type=int, default=3)
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 4) - 2))
+    ap.add_argument("--seed-base", type=int, default=None, help="generate a different set of levels (soak testing)")
     a = ap.parse_args()
+    if a.seed_base is not None:  # read by the worker processes when they build their levels
+        os.environ["DOOM_EVAL_SEED"] = str(900_000_000 + a.seed_base * 10_000)
     levels = level_list(a.per_tier, a.freedoom)
     seeds = list(range(a.seeds))
     results = {}
