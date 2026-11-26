@@ -230,3 +230,4 @@ training/checkpoints/
 training/runs/
 .claude/
 training/aws/.instance*
+env/**/__pycache__/
