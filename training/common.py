@@ -78,15 +78,14 @@ def learner_device():
 
 
 # heads: 0 move, 1 strafe, 2 turn, 3 fire, 4 use, 5 weapon
-RARE_HEADS = (3, 4, 5)
+# cap of the inverse-frequency class weight per rare head. The policy *samples* its actions, so a
+# weight of w makes it press roughly w times as often as the teacher: 25 turned one gun swap per
+# game into fifty. Small caps keep the learning signal without the button spam.
+RARE_HEADS = {4: 4.0, 5: 2.0}
 
 
-def head_ce(logits_list, lab, m, max_w=25.0):
-    """Per-head cross-entropy, class-weighted by inverse frequency in the batch for the rare heads.
-
-    USE (doors) and weapon-switch are pressed on ~1% of teacher frames, so plain cross-entropy teaches
-    the student to never press them: it then cannot open a door or change gun. Inverse-frequency
-    weights (capped) make a correct rare press count as much as the common no-press.
+def head_ce(logits_list, lab, m):
+    """Per-head cross-entropy, lightly class-weighted for the rarely pressed heads (USE, weapon).
     Returns (per-sample loss, per-head accuracy list)."""
     import torch.nn.functional as F
 
@@ -97,7 +96,7 @@ def head_ce(logits_list, lab, m, max_w=25.0):
         with torch.no_grad():
             if j in RARE_HEADS:
                 cnt = torch.bincount(y[m > 0], minlength=nc).float()
-                w = (cnt.sum() / (nc * cnt.clamp(min=1.0))).clamp(min=1.0, max=max_w)
+                w = (cnt.sum() / (nc * cnt.clamp(min=1.0))).clamp(min=1.0, max=RARE_HEADS[j])
             else:
                 w = torch.ones(nc, device=l.device)
         total = total + F.cross_entropy(l, y, weight=w, reduction="none")
