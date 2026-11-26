@@ -172,7 +172,10 @@ class DoomNet(nn.Module):
             core = torch.cat(outs, 0).reshape(T * B, -1)
         z = torch.cat([core, x.view(T * B, -1)], -1)
         if "priv" in o:
-            v = self.vpriv(torch.cat([z, o["priv"].float()], -1)).squeeze(-1)
+            # the critic reads the policy's features but may not reshape them: a fresh critic's large
+            # early errors otherwise flow into the shared layers and undo what the policy knows
+            # (measured: benchmark 231 -> 155 in 0.4M steps with the policy loss switched off)
+            v = self.vpriv(torch.cat([z.detach(), o["priv"].float()], -1)).squeeze(-1)
         else:
             v = self.v(z).squeeze(-1)
         return self.pi(z), v, h, core
