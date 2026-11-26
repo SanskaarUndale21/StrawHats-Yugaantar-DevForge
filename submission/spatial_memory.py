@@ -3,7 +3,10 @@
 The observation has no global coordinates, so the agent keeps its own private frame:
   * heading is integrated from its own TURN actions (ViZDoom's keyboard turn profile: the first five
     held tics turn slowly, then full speed; measured in training/README.md),
-  * position is integrated from the ego-frame velocity in `vitals` (trapezoid rule over the 4 tics).
+  * position is integrated from the ego-frame velocity in `vitals` (trapezoid rule over the 4 tics),
+  * then the pose is corrected by scan matching: this step's wall hits are slid over the walls already
+    in the map and the best fit wins (the engine keeps reporting velocity while the player is stuck
+    against a wall, so dead reckoning alone drifts by whole rooms).
 
 Every step the 64 rays paint free space / walls / doors / locked doors into a toroidal grid at two
 resolutions (64 and 256 map units per cell); keycards and pickups seen in `visible_entities` are
@@ -24,6 +27,15 @@ RAY_RANGE = 1024.0
 SLOW_TURN, FAST_TURN, SLOW_TICS = 1.7578125, 3.515625, 5  # degrees per tic
 FRAME_SKIP = 4
 VEL_A, VEL_B = 1.683, 2.493  # fitted in training/calibrate_odometry.py
+DEAD_TICS = 7  # the engine ignores input for the first 7 tics of an episode (measured)
+
+# scan matching: wall hits are stamped into a fine toroidal grid and later scans are aligned to it
+M_RES, G_MATCH = 16.0, 512  # 16 map units per cell, spans the same 8192 units as the map
+_off = np.arange(-48.0, 48.1, 8.0)
+_OX, _OY = [a.ravel() for a in np.meshgrid(_off, _off, indexing="ij")]
+_PRIOR = 0.1 * (_OX**2 + _OY**2) / 64.0  # prefer the odometry guess where the walls do not decide
+_ZERO = int(np.argmin(_OX**2 + _OY**2))
+_ST = [(dx, dy, 4 - 2 * abs(dx) - 2 * abs(dy) + abs(dx * dy)) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]  # 4 / 2 / 1
 
 FINE, COARSE = 64.0, 256.0
 G_FINE, G_COARSE = 128, 32  # both span 8192 map units, wrapped (toroidal)
@@ -61,6 +73,8 @@ class SpatialMemory:
         self.x = self.y = 0.0
         self.th = 0.0  # radians, CCW
         self.turnheld = 0
+        self.tic = 0
+        self.hitg = np.zeros((G_MATCH, G_MATCH), np.uint8)
         self.prev_vel = np.zeros(2)
         self.prev_action = np.zeros(9, np.float32)
         self.step = 0
@@ -76,9 +90,11 @@ class SpatialMemory:
         d = float(left) - float(right)
         dth = 0.0
         for _ in range(FRAME_SKIP):
+            self.tic += 1
             if left or right:
-                self.turnheld += 1
-                dth += d * (SLOW_TURN if self.turnheld <= SLOW_TICS else FAST_TURN)
+                self.turnheld += 1  # the held counter runs even while input is dead
+                if self.tic > DEAD_TICS:
+                    dth += d * (SLOW_TURN if self.turnheld <= SLOW_TICS else FAST_TURN)
             else:
                 self.turnheld = 0
         th0 = self.th
@@ -90,6 +106,28 @@ class SpatialMemory:
         self.x += VEL_A * w0[0] + VEL_B * w1[0]
         self.y += VEL_A * w0[1] + VEL_B * w1[1]
         self.prev_vel = np.array(vel_fr, np.float64)
+
+    # ------------------------------------------------------------------ scan matching
+    def _match(self, ex: np.ndarray, ey: np.ndarray) -> None:
+        """ex, ey: this step's static wall hits relative to the agent (world-aligned axes).
+        Slide them over the remembered walls, move the pose to the best fit, then remember new walls."""
+        if len(ex) >= 6 and self.step > 1:
+            ix = np.floor((self.x + ex[None, :] + _OX[:, None]) / M_RES).astype(np.int64) % G_MATCH
+            iy = np.floor((self.y + ey[None, :] + _OY[:, None]) / M_RES).astype(np.int64) % G_MATCH
+            hits = self.hitg[ix, iy]
+            score = hits.sum(1).astype(np.float64) - _PRIOR
+            b = int(np.argmax(score))
+            # only trust the fit when enough of the scan lands on known walls
+            if b != _ZERO and (hits[b] > 0).sum() >= max(6, len(ex) // 3) and score[b] > score[_ZERO] + 2.0:
+                self.x += _OX[b]
+                self.y += _OY[b]
+        cx = np.floor((self.x + ex) / M_RES).astype(np.int64)
+        cy = np.floor((self.y + ey) / M_RES).astype(np.int64)
+        new = self.hitg[cx % G_MATCH, cy % G_MATCH] == 0  # first sighting anchors a wall: no creep
+        cx, cy = cx[new], cy[new]
+        for dx, dy, w in _ST:
+            jx, jy = (cx + dx) % G_MATCH, (cy + dy) % G_MATCH
+            self.hitg[jx, jy] = np.maximum(self.hitg[jx, jy], w)
 
     # ------------------------------------------------------------------ map writes
     def _paint(self, ch: int, wx: np.ndarray, wy: np.ndarray, value: float = 1.0) -> None:
@@ -119,6 +157,9 @@ class SpatialMemory:
         ca, sa = np.cos(ang), np.sin(ang)
         dunits = dist.astype(np.float64) * RAY_RANGE
 
+        static = ((hit == RAY_WALL) | (hit == RAY_DOOR) | (hit == RAY_LOCK)) & (dist < 0.97)
+        self._match(ca[static] * dunits[static], sa[static] * dunits[static])
+
         # novelty along each ray, measured before this step's visit is recorded
         s = dunits[:, None] * _NOV_SAMPLES[None, :]
         nx = np.floor((self.x + ca[:, None] * s) / FINE).astype(np.int64) % G_FINE
@@ -130,6 +171,16 @@ class SpatialMemory:
         sx = (self.x + ca[:, None] * _SAMPLES[None, :])[m]
         sy = (self.y + sa[:, None] * _SAMPLES[None, :])[m]
         self._paint(C_FREE, sx, sy)
+        # a ray passing through a remembered door means it is open now: forget it (re-added below if still shut)
+        fx = np.floor(sx / FINE).astype(np.int64) % G_FINE
+        fy = np.floor(sy / FINE).astype(np.int64) % G_FINE
+        was_door = (self.fine[C_DOOR, fx, fy] > 0) | (self.fine[C_LOCK, fx, fy] > 0)
+        if was_door.any():
+            self.fine[C_DOOR, fx[was_door], fy[was_door]] = 0.0
+            self.fine[C_LOCK, fx[was_door], fy[was_door]] = 0.0
+            for c in set(zip(fx[was_door].tolist(), fy[was_door].tolist())):
+                self.doors.pop(c, None)
+                self.locks.pop(c, None)
         # obstacles at the hit point
         hx, hy = self.x + ca * (dunits + 8.0), self.y + sa * (dunits + 8.0)
         for t, ch in ((RAY_WALL, C_WALL), (RAY_DOOR, C_DOOR), (RAY_LOCK, C_LOCK)):
