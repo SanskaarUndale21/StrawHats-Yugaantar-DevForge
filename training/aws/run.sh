@@ -27,15 +27,19 @@ distill() {
 rl() {
   local extra=""
   if [ -f $CK/rl_done_init ] && [ -f $CK/latest.pt ]; then extra="--resume";
-  elif [ -f $CK/student.pt ]; then extra="--init $CK/student.pt --critic-warmup 30"; touch $CK/rl_done_init;
+  elif [ -f $CK/student.pt ]; then extra="--init $CK/student.pt --critic-warmup 150"; touch $CK/rl_done_init;
   elif [ -f $CK/latest.pt ]; then extra="--resume"; touch $CK/rl_done_init; fi
   # a fresh RL phase after distillation must not resume the old pre-distillation checkpoint
   if [[ "$extra" == --init* ]] && [ -f $CK/latest.pt ]; then mv $CK/latest.pt $CK/pre_distill_latest.pt; fi
+  # First attempt (lr 1e-4, entropy 0.01, 30 warm-up updates) made the student worse: fixed benchmark
+  # 245 -> 160-200 within 2.5M steps while the entropy rose. So: the value head gets 150 updates
+  # (about 1M steps) before the policy moves at all, and the policy then moves slowly with almost
+  # no entropy bonus and a strong teacher-label term.
   # fine-tuning a trained student: small learning rate, bounded policy change per batch, the teacher
   # still labelling the states the policy itself reaches (also after a resume), and a
   # faster march through the curriculum stages (each is forced after 6M steps at the latest)
   uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED \
-    --lr 1e-4 --target-kl 0.03 --stage-steps 6000000 --ckdir $CK --bc-coef 0.5 --bc-decay 30000000 $extra 2>&1 | tee -a $CK/train.out
+    --lr 5e-5 --target-kl 0.02 --ent 0.003 --stage-steps 6000000 --ckdir $CK --bc-coef 1.0 --bc-decay 40000000 $extra 2>&1 | tee -a $CK/train.out
 }
 
 case "$PHASE" in
