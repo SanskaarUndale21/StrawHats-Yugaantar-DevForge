@@ -29,7 +29,7 @@ def priv(env) -> dict:
 
 class RewardShaper:
     W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.01, key=4.0, door=0.5, unlock=4.0,
-             exit=12.0, exit_health=3.0, exit_time=4.0, death=3.0, step=0.001, use_spam=0.003,
+             exit=12.0, exit_health=3.0, exit_time=6.0, death=3.0, step=0.002, use_spam=0.003,
              hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.004)
 
     def reset(self, ps: dict) -> None:

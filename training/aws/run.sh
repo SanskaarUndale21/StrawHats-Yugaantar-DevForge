@@ -29,7 +29,10 @@ rl() {
   elif [ -f $CK/latest.pt ]; then extra="--resume"; touch $CK/rl_done_init; fi
   # a fresh RL phase after distillation must not resume the old pre-distillation checkpoint
   if [[ "$extra" == --init* ]] && [ -f $CK/latest.pt ]; then mv $CK/latest.pt $CK/pre_distill_latest.pt; fi
-  uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED $extra 2>&1 | tee -a $CK/train.out
+  # fine-tuning a trained student: small learning rate, bounded policy change per batch, and a
+  # faster march through the curriculum stages (each is forced after 6M steps at the latest)
+  uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED \
+    --lr 1e-4 --target-kl 0.03 --stage-steps 6000000 --ckdir $CK $extra 2>&1 | tee -a $CK/train.out
 }
 
 case "$PHASE" in
