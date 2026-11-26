@@ -52,9 +52,9 @@ class _Slot:
     ~30 ms, while creating a new DoomGame costs ~1 s, so a fresh WAD is only built every few dozen
     episodes (or when the curriculum stage changes)."""
 
-    def __init__(self, wid, idx, stage_val, seed):
+    def __init__(self, wid, idx, ctl, seed):
         self.idx = idx
-        self.stage_val = stage_val
+        self.stage_val, self.beta_val, self.mode_val = ctl
         self.rng = random.Random(seed)
         self.env = None
         self.fd_env = None  # Freedoom 2 campaign env (IWAD maps), created lazily
@@ -62,6 +62,9 @@ class _Slot:
         self.wad_path = None
         self.wad_stage = -1
         self.wad_tags = {}
+        self.wad_layouts = {}
+        self.layout = None
+        self.teacher = None
         self.queue = []
         self.fixtures = _fixture_lumps()
         self.tags = []
@@ -72,7 +75,7 @@ class _Slot:
         from doom_env.wad import Lump, write_wad
         from mapgen import generate, spec_for_stage, to_udmf
 
-        lumps, tags = [], {}
+        lumps, tags, layouts = [], {}, {}
         for i in range(GEN_PER_WAD):
             spec = spec_for_stage(stage, self.rng)
             L = None
@@ -81,7 +84,8 @@ class _Slot:
                 L = generate(spec, sd)
             name = f"MAP{i + 1:02d}"
             lumps += [Lump(name, b""), Lump("TEXTMAP", to_udmf(L, sd).encode()), Lump("ENDMAP", b"")]
-            tags[name] = spec.tags
+            tags[name] = spec.tags + ([] if spec.exit else ["noexit"])
+            layouts[name] = L
         for j, tm in enumerate(self.rng.sample(self.fixtures, MAPS_PER_WAD - GEN_PER_WAD)):
             name = f"MAP{GEN_PER_WAD + j + 1:02d}"
             lumps += [Lump(name, b""), Lump("TEXTMAP", tm), Lump("ENDMAP", b"")]
@@ -100,6 +104,7 @@ class _Slot:
                 pass
         self.wad_stage = stage
         self.wad_tags = tags
+        self.wad_layouts = layouts
         self.queue = [f"MAP{i:02d}" for i in range(1, MAPS_PER_WAD + 1)]
         self.rng.shuffle(self.queue)
         self.queue = [m for m in self.queue for _ in range(2)]  # two episodes per level
@@ -120,7 +125,9 @@ class _Slot:
     def _pick(self):
         stage = int(self.stage_val.value)
         ticks = self.rng.choice([2100, 2800, 3500, 4200])
-        if self.rng.random() < 0.03 * stage:
+        distill = int(self.mode_val.value) == 2
+        self.layout = None
+        if not distill and self.rng.random() < 0.03 * stage:
             import vizdoom as vd
             from doom_env import make_env
 
@@ -133,8 +140,14 @@ class _Slot:
         if not self.queue or stage != self.wad_stage:
             self._build_wad(stage)
         name = self.queue.pop()
+        while distill and name not in self.wad_layouts and self.queue:  # teacher needs a layout
+            name = self.queue.pop()
+        if name not in self.wad_layouts and distill:
+            self._build_wad(stage)
+            name = self.queue.pop()
         self._switch(self.env, name, ticks)
         self.tags = self.wad_tags[name]
+        self.layout = self.wad_layouts.get(name)
         return self.env
 
     def reset(self):
@@ -148,11 +161,28 @@ class _Slot:
         self.shaper.reset(self.cur.privileged_state())
         self.ret = 0.0
         self.len = 0
+        self.obs = obs
+        self.teacher = None
+        if self.layout is not None and int(self.mode_val.value) >= 1:
+            from teacher import Teacher
+
+            self.teacher = Teacher(self.layout, seed=self.rng.randrange(1 << 30))
         return obs, self.mem.update(obs, None)
 
-    def step(self, buttons):
+    def step(self, choice):
+        """choice: the learner's head choices (6,). In distill mode the teacher's action is executed
+        with probability beta (DAgger). Returns the teacher's label for the state (or -1s)."""
+        from model import to_buttons
         from rewards import aux_targets
+        from teacher import buttons_to_choice
 
+        buttons = to_buttons(np.asarray(choice)[None])[0]
+        label = np.full(6, -1, np.int64)
+        if self.teacher is not None:
+            tb = self.teacher.act(self.obs, self.cur.privileged_state())
+            label = buttons_to_choice(tb)
+            if self.rng.random() < float(self.beta_val.value):
+                buttons = tb
         obs, _, term, trunc, info = self.cur.step(buttons)
         ps = self.cur.privileged_state()
         r = self.shaper(ps, buttons)
@@ -165,7 +195,8 @@ class _Slot:
             obs, feats = self.reset()
         else:
             feats = self.mem.update(obs, buttons)
-        return feats, r, done, ep, aux_targets(obs)
+        self.obs = obs
+        return feats, r, done, ep, aux_targets(obs), label
 
     def close(self):
         for e in (self.env, self.fd_env):
@@ -173,14 +204,12 @@ class _Slot:
                 e.close()
 
 
-def _worker(remote, wid, n, stage_val, seed):
+def _worker(remote, wid, n, ctl, seed):
     _hires_timer()
     import torch  # noqa: F401  (keeps thread settings consistent)
 
     torch.set_num_threads(1)
-    from model import to_buttons
-
-    slots = [_Slot(wid, wid * n + i, stage_val, seed + 1000 * i) for i in range(n)]
+    slots = [_Slot(wid, wid * n + i, ctl, seed + 1000 * i) for i in range(n)]
     try:
         while True:
             cmd, data = remote.recv()
@@ -191,8 +220,7 @@ def _worker(remote, wid, n, stage_val, seed):
                     out.append((feats, aux_targets_safe(obs)))
                 remote.send(out)
             elif cmd == "step":
-                buttons = to_buttons(data)
-                remote.send([s.step(b) for s, b in zip(slots, buttons)])
+                remote.send([s.step(c) for s, c in zip(slots, data)])
             elif cmd == "close":
                 break
     finally:
@@ -207,15 +235,18 @@ def aux_targets_safe(obs):
 
 
 class VecDoom:
-    def __init__(self, workers: int, envs_per_worker: int, seed: int = 0):
+    def __init__(self, workers: int, envs_per_worker: int, seed: int = 0, mode: int = 0):
+        """mode 0: RL only; 1: RL + teacher labels (BC regulariser); 2: DAgger distillation."""
         ctx = mp.get_context("spawn")
         self.stage = ctx.Value("i", 0)
+        self.beta = ctx.Value("d", 0.0)
+        self.mode = ctx.Value("i", mode)
         self.n = workers * envs_per_worker
         self.k = envs_per_worker
         self.remotes, self.procs = [], []
         for w in range(workers):
             a, b = ctx.Pipe()
-            p = ctx.Process(target=_worker, args=(b, w, envs_per_worker, self.stage, seed + 7919 * w), daemon=True)
+            p = ctx.Process(target=_worker, args=(b, w, envs_per_worker, (self.stage, self.beta, self.mode), seed + 7919 * w), daemon=True)
             p.start()
             self.remotes.append(a)
             self.procs.append(p)
@@ -239,10 +270,14 @@ class VecDoom:
         done = np.array([x[2] for x in res], np.float32)
         eps = [x[3] for x in res if x[3] is not None]
         aux = np.stack([x[4] for x in res])
-        return feats, rew, done, eps, aux
+        label = np.stack([x[5] for x in res])
+        return feats, rew, done, eps, aux, label
 
     def set_stage(self, s: int):
         self.stage.value = int(s)
+
+    def set_beta(self, b: float):
+        self.beta.value = float(b)
 
     def close(self):
         for r in self.remotes:

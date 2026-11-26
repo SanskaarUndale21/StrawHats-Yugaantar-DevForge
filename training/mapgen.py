@@ -74,7 +74,7 @@ def spec_for_stage(stage: int, rng: random.Random) -> LevelSpec:
     if kind == "combat":
         size = 8 + 3 * s
         return LevelSpec(width=(size, size + 6), height=(size, size + 6), rooms=(1, 2), room_size=(5, 8 + s),
-                         monsters=(2 + s, 4 + 3 * s), items=(2, 5), arena=True, stage=s, exit=rng.random() < 0.7,
+                         monsters=(1 + s, 2 + 3 * s), items=(2, 5), arena=True, stage=s, exit=rng.random() < 0.7,
                          tags=["combat"])
     if kind == "explore":
         size = 16 + 5 * s

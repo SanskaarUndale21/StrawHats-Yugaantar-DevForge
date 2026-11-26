@@ -94,7 +94,7 @@ class Collector:
     def collect(self):
         T = self.T
         buf = {k: [] for k in FEAT_KEYS}
-        out = {k: [] for k in ("choice", "logp", "rew", "done", "starts", "aux")}
+        out = {k: [] for k in ("choice", "logp", "rew", "done", "starts", "aux", "label")}
         eps = []
         h0 = self.h.clone()
         t_roll, t_env = time.time(), 0.0
@@ -110,7 +110,9 @@ class Collector:
                 choice, logp, _ = sample(logits)
                 choice_np, logp_np = choice.cpu().numpy(), logp.cpu().numpy()
             te = time.time()
-            self.feats, rew, done, ep, self.aux = self.venv.step(choice_np)
+            out["label"].append(None)
+            self.feats, rew, done, ep, self.aux, label = self.venv.step(choice_np)
+            out["label"][-1] = label
             t_env += time.time() - te
             out["choice"].append(choice_np)
             out["logp"].append(logp_np)
@@ -173,15 +175,25 @@ def main():
     ap.add_argument("--stage", type=int, default=0)
     ap.add_argument("--stage-steps", type=int, default=10_000_000, help="force next stage after this many steps")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--ckdir", default=None, help="checkpoint dir (default training/checkpoints); "
+                    "weights are exported to submission/ only with the default dir")
+    ap.add_argument("--init", default=None, help="start from these policy weights (e.g. distilled student)")
+    ap.add_argument("--bc-coef", type=float, default=0.0, help="teacher behaviour-cloning regulariser weight")
+    ap.add_argument("--bc-decay", type=int, default=20_000_000, help="steps over which bc-coef decays to 0")
+    ap.add_argument("--critic-warmup", type=int, default=0, help="updates with policy frozen (value head only)")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
     _hires_timer()
     torch.manual_seed(a.seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckdir = ROOT / "training" / "checkpoints"
-    ckdir.mkdir(exist_ok=True)
-    wpath = ROOT / "submission" / "weights" / "doomnet.pt"
+    if dev.type == "cpu":  # cloud CPU box: leave most cores to the env workers
+        import os
+
+        torch.set_num_threads(max(2, (os.cpu_count() or 8) // 4))
+    ckdir = Path(a.ckdir) if a.ckdir else ROOT / "training" / "checkpoints"
+    ckdir.mkdir(parents=True, exist_ok=True)
+    wpath = ROOT / "submission" / "weights" / "doomnet.pt" if not a.ckdir else ckdir / "doomnet.pt"
 
     net = DoomNet().to(dev)
     rnd = RND(9 * 64 + 49).to(dev)
@@ -197,8 +209,12 @@ def main():
         step, stage, update = ck["step"], ck["stage"], ck["update"]
         stage_start = step
         print(f"resumed at step {step} stage {stage}")
+    elif a.init:
+        sd = torch.load(a.init, map_location=dev, weights_only=False)
+        net.load_state_dict(sd["model"] if "model" in sd else sd)
+        print(f"initialised policy from {a.init}")
 
-    venv = VecDoom(a.workers, a.envs_per_worker, seed=a.seed * 100003)
+    venv = VecDoom(a.workers, a.envs_per_worker, seed=a.seed * 100003, mode=1 if a.bc_coef > 0 else 0)
     venv.set_stage(stage)
     N, T = venv.n, a.rollout
     ret_acc = np.zeros(N)
@@ -223,7 +239,10 @@ def main():
 
         def loop():
             while not stop.is_set():
-                r = collector.collect()
+                try:
+                    r = collector.collect()
+                except (EOFError, BrokenPipeError, OSError):
+                    return  # workers shut down
                 while not stop.is_set():
                     try:
                         q.put(r, timeout=1.0)
@@ -243,7 +262,7 @@ def main():
         step += N * T
         for e in R["eps"]:
             eps_hist.append(e)
-            if e["tags"] and e["tags"][0] not in ("freedoom", "fixture"):
+            if e["tags"] and e["tags"][0] not in ("freedoom", "fixture") and "noexit" not in e["tags"]:
                 stage_hist.append(e["exit"])
         B = {k: torch.as_tensor(v, device=dev) for k, v in R["feats"].items()}  # T,N,...
         ST = torch.as_tensor(R["starts"], device=dev)
@@ -294,6 +313,9 @@ def main():
         ADV = torch.as_tensor(adv, device=dev)
         RET = torch.as_tensor(rets, device=dev)
         AUX = torch.as_tensor(R["aux"], device=dev)
+        LAB = torch.as_tensor(R["label"], device=dev)  # T,N,6 teacher labels (-1 = none)
+        bc_w = a.bc_coef * max(0.0, 1.0 - (step - step0) / max(a.bc_decay, 1))
+        pg_on = 0.0 if update < a.critic_warmup else 1.0
         XR = x
         mb = max(1, N // a.minibatches)
         stats = collections.defaultdict(list)
@@ -312,7 +334,16 @@ def main():
                 vl = 0.5 * (v - RET[:, idx].reshape(-1)).pow(2).mean()
                 aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, 2))
                 rnd_l = rnd(XR[:, idx].reshape(-1, XR.shape[-1])).mean()
-                loss = pg + 0.5 * vl - a.ent * (1 - 0.5 * frac) * ent.mean() + a.aux_coef * aux_l + rnd_l
+                loss = pg_on * (pg - a.ent * (1 - 0.5 * frac) * ent.mean()) + 0.5 * vl + a.aux_coef * aux_l + rnd_l
+                if bc_w > 0:
+                    lab = LAB[:, idx].reshape(T * len(idx), -1)
+                    m = (lab[:, 0] >= 0).float()
+                    if m.sum() > 0:
+                        bc = sum(F.cross_entropy(l, lab[:, j].clamp(min=0), reduction="none")
+                                 for j, l in enumerate(split_logits(logits)))
+                        bc = (bc * m).sum() / m.sum()
+                        loss = loss + bc_w * bc
+                        stats["bc"].append(bc.item())
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(net.parameters(), 0.5)

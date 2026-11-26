@@ -5,6 +5,10 @@ mapgen.py              procedural UDMF level generator + curriculum specs (comba
 vec_env.py             multiprocess envs: fresh levels, SpatialMemory features, shaped rewards, aux targets
 rewards.py             reward shaping from privileged ground truth (training only)
 train.py               recurrent PPO + RND curiosity + auxiliary losses + curriculum (from scratch, no SB3)
+teacher.py             privileged scripted teacher (training only) that plans over cells it has already seen
+distill.py             DAgger teacher -> student distillation into the recurrent DoomNet
+watch.py               live viewer: game window + the agent's own memory map + stats
+aws/                   one-command cloud training (launch / status / fetch / terminate)
 calibrate_odometry.py  fits the odometry constants used by submission/spatial_memory.py
 ```
 
@@ -73,3 +77,31 @@ makes every engine sync sleep). `vec_env._hires_timer()` does this in every work
   * Levels randomise size, room count, heights, light, textures, monsters and items.
   * The 13 template fixture maps and the Freedoom 2 campaign maps are mixed in for realism.
 * **Domain randomisation:** episode tick cap drawn from 2100 to 4200, and random spawn seeds.
+
+## Teacher -> student -> RL (main pipeline)
+
+1. **Privileged teacher** (`teacher.py`, training only). It reads the true pose and the generated
+   level layout, but plans only over cells it has already *seen* through the same 64 rays the agent
+   gets. That keeps its behaviour explainable from the agent's own observations, so the student can
+   imitate it instead of copying god-view shortcuts.
+   * Priorities: fight a visible enemy (circle-strafe, back off from melee), then go to a seen
+     exit, then fetch a seen keycard for a seen locked door, then pick up health when low, then
+     explore the nearest frontier.
+   * Doors take a single USE press. A stuck detector triggers short escapes.
+   * About 50% exits on stage-2 levels, including keycard -> locked door -> exit chains.
+2. **DAgger distillation** (`distill.py`). The student (DoomNet, normal observations only) plays.
+   The teacher labels every visited state, and the executed action is the teacher's with
+   probability beta, annealed from 1 down to 0.1. The loss is cross-entropy on the 6 factorised
+   heads through the GRU, plus the auxiliary losses.
+3. **RL fine-tuning** (`train.py --init student.pt --bc-coef 0.5 --critic-warmup 30`). PPO+RND
+   starts from the student. The value head is warmed up first, and a behaviour-cloning term that
+   decays to 0 keeps it close to the teacher early on, then lets RL go beyond it.
+
+```bash
+uv run python training/teacher.py --stage 2 --episodes 12        # teacher success rate
+uv run python training/distill.py --init training/checkpoints/latest.pt
+uv run python training/train.py --init training/checkpoints/student.pt --bc-coef 0.5 --critic-warmup 30
+```
+
+The final agent is the neural network only. The teacher, the privileged state and the scripted
+logic never run at evaluation.
