@@ -85,6 +85,8 @@ class SlamView:
         n = self.N
         self.free, self.wall, self.door, self.lock = (np.zeros((n, n), np.uint8) for _ in range(4))
         self.path = []
+        self.walked = np.zeros((n, n), np.uint8)
+        self.now = []
         self.truth = []
         if layout is not None and start is not None:  # outline of the real level, in the agent's frame
             x0, y0, a0 = start
@@ -124,6 +126,15 @@ class SlamView:
                 else:
                     cv2.circle(layer, a, th // 2, 255, -1)
         self.path.append((mem.x, mem.y))
+        cv2.circle(self.walked, tuple(int(v) for v in np.rint(self._px(mem.x, mem.y))), 5, 255, -1)
+        e = obs["visible_entities"]
+        m = np.asarray(e["mask"]).astype(bool)
+        f = np.asarray(e["features"], np.float64)[m]
+        t = np.asarray(e["entity_type"])[m]
+        dd = f[:, 0] * 1024.0
+        fx, fy = dd * f[:, 2], dd * f[:, 1]  # forward, left
+        c, s_ = np.cos(mem.th), np.sin(mem.th)
+        self.now = [(int(k), mem.x + c * a - s_ * b, mem.y + s_ * a + c * b) for k, a, b in zip(t, fx, fy)]
 
     def render(self, mem, size=PANEL):
         ys, xs = np.nonzero(self.free)
@@ -137,6 +148,7 @@ class SlamView:
         k = size / side
         img = np.full((side, side, 3), self.BG, np.uint8)
         img[self.free[sl] > 0] = self.FLOOR
+        img[self.walked[sl] > 0] = (104, 84, 62)  # floor the agent has actually stood on
         img = cv2.resize(img, (size, size), interpolation=cv2.INTER_NEAREST)
 
         def out(x, y):
@@ -149,7 +161,7 @@ class SlamView:
             p = np.array(self.path)
             cv2.polylines(img, [out(p[:, 0], p[:, 1])], False, (230, 150, 60), 2, cv2.LINE_AA)
         for layer, col, grow in ((self.wall, self.WALL, 1), (self.door, self.DOOR, 2), (self.lock, self.LOCK, 2)):
-            m = cv2.resize(layer[sl], (size, size), interpolation=cv2.INTER_LINEAR) > 110
+            m = cv2.resize(layer[sl], (size, size), interpolation=cv2.INTER_AREA if size < side else cv2.INTER_LINEAR) > 150
             if grow > 1:
                 m = cv2.dilate(m.astype(np.uint8), np.ones((grow, grow), np.uint8)) > 0
             img[m] = col
@@ -157,6 +169,13 @@ class SlamView:
             c = out(kx, ky)
             cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 220, 255), -1, cv2.LINE_AA)
             cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 0, 0), 1, cv2.LINE_AA)
+        for k, ex, ey in self.now:  # what it can see this instant
+            q = out(ex, ey)
+            q = (int(q[0]), int(q[1]))
+            if k in (1, 2, 3):
+                cv2.drawMarker(img, q, (40, 40, 255), cv2.MARKER_TRIANGLE_UP, 12, 2, cv2.LINE_AA)
+            elif k in (5, 6, 7, 8):
+                cv2.circle(img, q, 3, (255, 220, 80), -1, cv2.LINE_AA)
         # the agent: a field-of-view wedge and an arrow
         c = out(mem.x, mem.y)
         fov = [out(mem.x + 260 * np.cos(mem.th + a), mem.y + 260 * np.sin(mem.th + a)) for a in np.linspace(-0.785, 0.785, 9)]
@@ -173,7 +192,8 @@ class SlamView:
         cv2.rectangle(img, (0, size - 22), (size, size), (0, 0, 0), -1)
         x = 8
         for name, col in (("wall", self.WALL), ("door", self.DOOR), ("locked", self.LOCK), ("key", (0, 220, 255)),
-                          ("path", (230, 150, 60)), ("seen floor", self.FLOOR)) +                 (("real level", (120, 96, 70)),) * bool(self.truth):
+                          ("path", (230, 150, 60)), ("seen", self.FLOOR), ("walked", (104, 84, 62)),
+                          ("enemy", (40, 40, 255)), ("pickup", (255, 220, 80))) +                 (("real level", (120, 96, 70)),) * bool(self.truth):
             cv2.rectangle(img, (x, size - 16), (x + 10, size - 6), col, -1)
             cv2.putText(img, name, (x + 14, size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA)
             x += 22 + cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0][0]
