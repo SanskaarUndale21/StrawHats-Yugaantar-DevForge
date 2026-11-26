@@ -88,7 +88,7 @@ def spec_for_stage(stage: int, rng: random.Random) -> LevelSpec:
                          door_prob=0.4, stage=s, tags=["keys"])
     size = 26 + 4 * s
     return LevelSpec(width=(size, size + 8), height=(size, size + 8), rooms=(5 + s, 7 + 2 * s),
-                     monsters=(3 + 2 * s, 6 + 4 * s), items=(3, 7), locks=rng.choice([1, 2]), door_prob=0.5,
+                     monsters=(2 + s, 4 + 2 * s), items=(5 + s, 9 + 2 * s), locks=rng.choice([1, 2]), door_prob=0.5,
                      stage=s, tags=["gauntlet"])
 
 

@@ -1,22 +1,23 @@
-"""Privileged scripted teacher for DAgger distillation (TRAINING ONLY, never used at evaluation).
+"""Privileged scripted "pro gamer" teacher for DAgger distillation (TRAINING ONLY, never at evaluation).
 
 The teacher reads ground truth the agent never gets (true pose from `privileged_state()`, the level
 layout produced by mapgen), but it only *plans over cells it has already seen* through the same 64 rays
-the agent sees. Its behaviour is therefore reproducible from the agent's own observation history,
-which is what makes it imitable (a god-view teacher that walks straight to an unseen keycard would
-teach the student behaviour it cannot explain).
+the agent sees, so its behaviour stays explainable from the agent's own observation history (a god-view
+teacher that walks straight to an unseen keycard would teach the student behaviour it cannot explain).
 
-Priorities each step:
-  1. combat  - nearest visible enemy within range: turn onto it and fire; back off from melee demons
-  2. exit    - exit pad seen and reachable (locks open with held keys) -> path to it
-  3. key     - a locked door blocks progress and a matching keycard has been seen -> fetch it
-  4. explore - path to the nearest frontier (seen floor next to unseen space)
-  doors are opened with a single USE press when the path runs into a closed one;
-  a stuck detector injects short random escapes.
+Behaviour, in priority order every step:
+  combat     nearest/most dangerous visible enemy: predictive aim (knows its own keyboard turn speed so it
+             does not overshoot), fire when on target, circle-strafe, keep range (back off from melee,
+             close in when too far), retreat while shooting when health is low, upgrade weapon
+  damage     shot by something it cannot see: turn around and scan
+  pickups    detour to visible weapons / ammo / armour / health when useful and close
+  exit       exit pad seen and reachable (locks open with held keys)
+  key        a seen locked door blocks progress and a matching keycard has been seen
+  explore    information-gain frontier: nearest frontier weighted by how much unexplored floor it reveals
+  movement   corridor-aware path following (clearance check for the player's 16-unit radius),
+             walks into doors and presses USE once, stuck detector with short escapes
 
-Outputs both MultiBinary buttons and the factorised head choices used by DoomNet.
-
-    python training/teacher.py --episodes 20 --stage 2      # measure teacher success on generated maps
+    python training/teacher.py --episodes 20 --stage 2      # teacher success on generated maps
 """
 
 from __future__ import annotations
@@ -31,8 +32,11 @@ CELL = 64.0
 LOCK_KEYS = {"B": (8, 11), "Y": (9, 12), "R": (10, 13)}  # vitals indices (card, skull)
 KEY_THINGS = {5: "B", 6: "Y", 13: "R"}
 ENEMY_TYPES = (1, 2, 3)
+MELEE, HITSCAN, PROJ = 1, 2, 3
+ITEM_HEALTH, ITEM_ARMOR, ITEM_AMMO, ITEM_WEAPON = 5, 6, 7, 8
 RAY_ANG = np.arange(64) * (2 * math.pi / 64)
 SAMPLES = np.arange(16.0, 1024.0 + 1, 32.0)
+SLOW, FAST = 1.7578125, 3.515625
 
 
 def buttons_to_choice(b) -> np.ndarray:
@@ -43,16 +47,18 @@ def buttons_to_choice(b) -> np.ndarray:
     return np.array([move, strafe, turn, int(b[6]), int(b[7]), int(b[8])], np.int64)
 
 
+def wrap_deg(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+
 class Teacher:
     def __init__(self, layout, seed: int = 0):
         self.L = layout
         self.h, self.w = layout.h, layout.w
         self.grid = layout.g
-        self.keys = {}  # (r, c) -> colour letter
-        for t, r, c, _ in layout.things:
-            if t in KEY_THINGS:
-                self.keys[(r, c)] = KEY_THINGS[t]
-        self.health = {(r, c) for t, r, c, _ in layout.things if t in (2011, 2012, 2014)}
+        self.wall = np.array([[ch == "#" for ch in row] for row in self.grid])
+        self.keys = {(r, c): KEY_THINGS[t] for t, r, c, _ in layout.things if t in KEY_THINGS}
+        self.weapon_cells = {(r, c) for t, r, c, _ in layout.things if t in (2001, 2002)}  # shotgun, chaingun
         self.exit = next(((r, c) for r in range(self.h) for c in range(self.w) if self.grid[r][c] == "E"), None)
         self.rng = random.Random(seed)
         self.reset()
@@ -63,15 +69,23 @@ class Teacher:
         self.path = []
         self.goal = None
         self.replan = 0
-        self.hist = deque(maxlen=12)
+        self.hist = deque(maxlen=10)
         self.escape = 0
         self.escape_act = None
         self.use_cool = 0
         self.prev_use = 0
+        self.wpn_cool = 0
         self.strafe_dir = 2
         self.strafe_t = 0
+        self.turn_held = 0      # consecutive tics a turn key has been held (engine turn profile)
+        self.prev_damage = None
+        self.scan = 0
+        self.item_target = None
+        self.item_t = 0
+        self.owns_better = False
+        self.prev_wpn = 0
 
-    # ------------------------------------------------------------------ geometry helpers
+    # ------------------------------------------------------------------ geometry
     def cell_of(self, x, y):
         return int(math.floor(-y / CELL)), int(math.floor(x / CELL))
 
@@ -95,95 +109,102 @@ class Teacher:
         ok = (rr >= 0) & (rr < self.h) & (cc >= 0) & (cc < self.w)
         self.seen[rr[ok], cc[ok]] = True
         r0, c0 = self.cell_of(x, y)
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                if self._in(r0 + dr, c0 + dc):
-                    self.seen[r0 + dr, c0 + dc] = True
+        self.seen[max(r0 - 1, 0):r0 + 2, max(c0 - 1, 0):c0 + 2] = True
 
     def _has_key(self, vit, col):
         a, b = LOCK_KEYS[col]
         return vit[a] > 0 or vit[b] > 0
 
-    def _passable(self, r, c, vit, known_only=True):
+    def _passable(self, r, c, vit):
         ch = self.grid[r][c]
-        if ch == "#":
-            return False
-        if known_only and not self.seen[r, c]:
+        if ch == "#" or not self.seen[r, c]:
             return False
         if ch in LOCK_KEYS:
             return self._has_key(vit, ch)
         return True
 
-    def _bfs(self, start, vit, targets):
-        """Shortest known path from start to any target cell. Returns list of cells (excl. start)."""
+    def _bfs_all(self, start, vit):
         prev = {start: None}
+        dist = {start: 0}
         q = deque([start])
-        hit = None
         while q:
             cur = q.popleft()
-            if cur in targets:
-                hit = cur
-                break
             r, c = cur
             for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 n = (r + dr, c + dc)
                 if n not in prev and self._in(*n) and self._passable(*n, vit):
                     prev[n] = cur
+                    dist[n] = dist[cur] + 1
                     q.append(n)
-        if hit is None:
-            return None
+        return prev, dist
+
+    @staticmethod
+    def _path(prev, goal, start):
         path = []
-        while hit != start:
-            path.append(hit)
-            hit = prev[hit]
+        while goal != start:
+            path.append(goal)
+            goal = prev[goal]
         return path[::-1]
 
-    def _frontier(self):
-        out = set()
-        for r in range(1, self.h - 1):
-            for c in range(1, self.w - 1):
-                if self.seen[r, c] and self.grid[r][c] != "#":
-                    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        if not self.seen[r + dr, c + dc]:
-                            out.add((r, c))
-                            break
+    def _frontier_gain(self):
+        """Seen floor cells next to unseen *walkable* space, with how much unseen floor is around them."""
+        unseen_floor = (~self.seen) & (~self.wall)
+        out = {}
+        for r, c in zip(*np.nonzero(self.seen & ~self.wall)):
+            r0, r1, c0, c1 = max(r - 1, 0), r + 2, max(c - 1, 0), c + 2
+            if unseen_floor[r0:r1, c0:c1].any():
+                out[(int(r), int(c))] = int(unseen_floor[max(r - 3, 0):r + 4, max(c - 3, 0):c + 4].sum())
         return out
 
     def _plan(self, start, vit):
-        if self.exit is not None and self.seen[self.exit]:
-            p = self._bfs(start, vit, {self.exit})
-            if p is not None:
-                return p, "exit"
-        # keys that open a seen locked door we cannot pass
+        prev, dist = self._bfs_all(start, vit)
+        if self.exit is not None and self.exit in dist:
+            return self._path(prev, self.exit, start), "exit"
         need = {ch for r in range(self.h) for c in range(self.w)
                 if (ch := self.grid[r][c]) in LOCK_KEYS and self.seen[r, c] and not self._has_key(vit, ch)}
-        want = {rc for rc, col in self.keys.items() if self.seen[rc] and rc not in self.taken
-                and (col in need or not self._has_key(vit, col))}
+        want = [rc for rc, col in self.keys.items() if rc in dist and rc not in self.taken
+                and (col in need or not self._has_key(vit, col))]
         if want:
-            p = self._bfs(start, vit, want)
-            if p is not None:
-                return p, "key"
-        if vit[0] < 40:
-            hp = {rc for rc in self.health if self.seen[rc] and rc not in self.taken}
-            if hp:
-                p = self._bfs(start, vit, hp)
-                if p is not None and len(p) < 25:
-                    return p, "health"
-        fr = self._frontier() - {start}
+            g = min(want, key=dist.get)
+            return self._path(prev, g, start), "key"
+        fr = {rc: gain for rc, gain in self._frontier_gain().items() if rc in dist and rc != start}
         if fr:
-            p = self._bfs(start, vit, fr)
-            if p is not None:
-                return p, "explore"
+            g = min(fr, key=lambda rc: dist[rc] - 0.35 * fr[rc])
+            return self._path(prev, g, start), "explore"
         return None, None
 
-    def _line_clear(self, x0, y0, x1, y1):
-        n = int(max(abs(x1 - x0), abs(y1 - y0)) / 16) + 1
-        for k in range(n + 1):
-            t = k / n
-            r, c = self.cell_of(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-            if not self._in(r, c) or self.grid[r][c] == "#":
-                return False
+    def _clear(self, x0, y0, x1, y1, radius=18.0):
+        """Straight-line walkability with the player's radius (three parallel lines)."""
+        dx, dy = x1 - x0, y1 - y0
+        n = math.hypot(dx, dy)
+        if n < 1:
+            return True
+        ox, oy = -dy / n * radius, dx / n * radius
+        steps = int(n / 12) + 1
+        for sx, sy in ((0, 0), (ox, oy), (-ox, -oy)):
+            for k in range(steps + 1):
+                t = k / steps
+                r, c = self.cell_of(x0 + sx + dx * t, y0 + sy + dy * t)
+                if not self._in(r, c) or self.wall[r, c]:
+                    return False
         return True
+
+    # ------------------------------------------------------------------ low-level control
+    def _turn_towards(self, b, err_deg, tol=2.0):
+        """Turn so the heading error shrinks without overshooting: the engine turns 7 deg on the first
+        held step, ~12 on the second and ~14 after, so only turn when the error exceeds half a step."""
+        held = self.turn_held
+        nxt = sum(SLOW if held + k + 1 <= 5 else FAST for k in range(4))
+        if abs(err_deg) > max(tol, nxt * 0.5):
+            if err_deg > 0:
+                b[4] = 1
+            else:
+                b[5] = 1
+
+    def _finish(self, b):
+        self.turn_held = self.turn_held + 4 if (b[4] or b[5]) else 0
+        self.prev_use = int(b[7])
+        return b
 
     # ------------------------------------------------------------------ act
     def act(self, obs, ps) -> np.ndarray:
@@ -191,100 +212,162 @@ class Teacher:
         vit = np.asarray(obs["vitals"])
         self._observe(obs, x, y, th)
         cur = self.cell_of(x, y)
-        if cur in self.keys or cur in self.health:
-            self.taken.add(cur)
+        self.taken.add(cur)
+        if cur in self.weapon_cells:
+            self.owns_better = True
         b = np.zeros(9, np.int8)
+        self.use_cool -= 1
+        self.wpn_cool -= 1
+        health = vit[0]
+
+        dmg = ps["damage_taken"]
+        hurt = self.prev_damage is not None and dmg > self.prev_damage
+        self.prev_damage = dmg
 
         # ---- stuck escape
         self.hist.append((x, y))
         if self.escape > 0:
             self.escape -= 1
-            return self.escape_act.copy()
-        if len(self.hist) == self.hist.maxlen:
-            (x0, y0) = self.hist[0]
-            if math.hypot(x - x0, y - y0) < 24 and self.goal is not None:
-                self.escape = self.rng.randint(3, 7)
-                e = np.zeros(9, np.int8)
-                e[self.rng.choice([2, 3])] = 1
-                e[self.rng.choice([4, 5])] = self.rng.random() < 0.6
-                e[1] = self.rng.random() < 0.5
-                self.escape_act = e
-                self.hist.clear()
-                self.path = []
-                return e.copy()
+            return self._finish(self.escape_act.copy())
 
-        # ---- combat
         ents = obs["visible_entities"]
         mask = np.asarray(ents["mask"]).astype(bool)
         et = np.asarray(ents["entity_type"])
         f = np.asarray(ents["features"])
-        enemies = np.flatnonzero(mask & np.isin(et, ENEMY_TYPES) & (f[:, 0] < 1.4))
-        ammo = vit[3]
-        if len(enemies) and (ammo > 0 or vit[2] <= 1):
-            i = enemies[0]  # nearest first
-            a = math.atan2(f[i, 1], f[i, 2])
-            deg = math.degrees(a)
-            if deg > 4:
-                b[4] = 1
-            elif deg < -4:
-                b[5] = 1
-            if abs(deg) < 7:
+        enemies = np.flatnonzero(mask & np.isin(et, ENEMY_TYPES) & (f[:, 0] < 2.0))
+
+        if len(self.hist) == self.hist.maxlen and not len(enemies):
+            x0, y0 = self.hist[0]
+            if math.hypot(x - x0, y - y0) < 20 and self.goal is not None:
+                self.escape = self.rng.randint(3, 6)
+                e = np.zeros(9, np.int8)
+                e[self.rng.choice([2, 3])] = 1
+                e[1] = 1
+                e[self.rng.choice([4, 5])] = self.rng.random() < 0.5
+                self.escape_act = e
+                self.hist.clear()
+                self.path = []
+                return self._finish(e.copy())
+
+        # ---- weapon: upgrade from fist/pistol when shells/bullets for something better exist
+        # weapon: never sit on the fist with bullets left; try to upgrade pistol -> shotgun when we have
+        # shells (SELECT_NEXT cycles owned weapons; if it wraps to the fist, the first rule cycles on)
+        if vit[2] <= 1 and vit[4:8].sum() > 0 and not self.prev_wpn:
+            b[8] = 1  # on the fist with ammo left: cycle on immediately
+        elif self.wpn_cool <= 0:
+            if vit[3] <= 0 and vit[4:8].sum() > 0:
+                b[8] = 1
+                self.wpn_cool = 3
+            elif vit[2] == 2 and self.owns_better and (vit[5] > 0 or vit[4] > 0):
+                b[8] = 1
+                self.wpn_cool = 40
+        self.prev_wpn = int(b[8])
+
+        # ---- combat
+        if len(enemies) and (vit[3] > 0 or vit[2] <= 1):
+            # threat: close enemies first, hitscan/projectile users weigh a bit more
+            threat = [f[i, 0] * (0.8 if et[i] in (HITSCAN, PROJ) else 1.0) for i in enemies]
+            i = enemies[int(np.argmin(threat))]
+            dist = f[i, 0] * 1024.0
+            err = math.degrees(math.atan2(f[i, 1], f[i, 2]))
+            tol = max(2.5, math.degrees(math.atan2(18.0, max(dist, 1.0))))
+            self._turn_towards(b, err, tol=tol)
+            if abs(err) < tol + 3.0:
                 b[6] = 1
-            if et[i] == 1 and f[i, 0] < 0.2:  # melee enemy in our face: back off
-                b[1] = 1
-            # circle-strafe to dodge hitscan/projectiles, flipping direction every few steps
+            # movement: circle-strafe, keep range, retreat when hurt
             self.strafe_t -= 1
             if self.strafe_t <= 0:
                 self.strafe_dir = 2 if self.strafe_dir == 3 else 3
-                self.strafe_t = self.rng.randint(4, 10)
-            side = np.asarray(obs["rays"]["distance"])[16 if self.strafe_dir == 2 else 48]
-            if side < 0.06:  # wall on that side: flip
+                self.strafe_t = self.rng.randint(5, 12)
+            rd = np.asarray(obs["rays"]["distance"])
+            left_room, right_room = rd[14:19].min(), rd[46:51].min()
+            here = left_room if self.strafe_dir == 2 else right_room
+            there = right_room if self.strafe_dir == 2 else left_room
+            if here < 0.06 and there > here:
                 self.strafe_dir = 2 if self.strafe_dir == 3 else 3
+                self.strafe_t = self.rng.randint(5, 12)
+            if max(left_room, right_room) > 0.06:
+                b[self.strafe_dir] = 1
+            back_clear = np.asarray(obs["rays"]["distance"])[32] > 0.1
+            outnumbered = len(enemies) >= 3
+            if (et[i] == MELEE and dist < 220) or ((health < 50 or outnumbered) and back_clear):
+                b[1] = 1
+            elif (dist > 700 or (et[i] == HITSCAN and dist > 380)) and abs(err) < 30 and health >= 50:
+                b[0] = 1  # close the distance: pistol/shotgun spread is useless at long range
+            self.scan = 0
+            return self._finish(b)
+
+        # ---- shot by something unseen: turn around and look
+        if hurt and self.scan <= 0:
+            self.scan = 8
+        if self.scan > 0:
+            self.scan -= 1
+            b[5] = 1
             b[self.strafe_dir] = 1
-            return b
-        if ammo <= 0 and vit[4:8].sum() > 0 and self.rng.random() < 0.1:
-            b[8] = 1
+            return self._finish(b)
+
+        # ---- pickups in view (gamer instinct): weapons always, ammo/armour/health when useful
+        want_types = [ITEM_WEAPON, ITEM_ARMOR]
+        if health < 90:
+            want_types.append(ITEM_HEALTH)
+        if vit[4:8].sum() < 120 or vit[3] < 15:
+            want_types.append(ITEM_AMMO)
+        items = np.flatnonzero(mask & np.isin(et, want_types) & (f[:, 0] < 0.6))
+        if len(items):
+            i = items[0]
+            ix = x + f[i, 0] * 1024 * (math.cos(th) * f[i, 2] - math.sin(th) * f[i, 1])
+            iy = y + f[i, 0] * 1024 * (math.sin(th) * f[i, 2] + math.cos(th) * f[i, 1])
+            if self._clear(x, y, ix, iy, radius=12.0):
+                err = math.degrees(math.atan2(f[i, 1], f[i, 2]))
+                self._turn_towards(b, err, tol=5.0)
+                if abs(err) < 35:
+                    b[0] = 1
+                self.goal = "item"
+                return self._finish(b)
 
         # ---- navigation
         self.replan -= 1
-        if not self.path or self.replan <= 0 or (self.path and self.path[0] == cur):
-            self.path, self.goal = self._plan(cur, vit)
-            self.path = self.path or []
-            self.replan = 6
         while self.path and self.path[0] == cur:
             self.path.pop(0)
+        if not self.path or self.replan <= 0:
+            self.path, self.goal = self._plan(cur, vit)
+            self.path = self.path or []
+            self.replan = 8
         if not self.path:
             b[0] = 1
-            b[4] = self.rng.random() < 0.3
-            return b
-        # lookahead: farthest path cell (<= 4 ahead) with a clear straight line
-        tgt = self.path[0]
-        for k in range(min(4, len(self.path))):
-            cx, cy = self.center(self.path[k])
-            if self.grid[self.path[k][0]][self.path[k][1]] in "DBYR" and k > 0:
-                break
-            if self._line_clear(x, y, cx, cy):
-                tgt = self.path[k]
-        tx, ty = self.center(tgt)
-        err = math.degrees(math.atan2(ty - y, tx - x) - th)
-        err = (err + 180) % 360 - 180
-        if err > 6:
             b[4] = 1
-        elif err < -6:
-            b[5] = 1
-        if abs(err) < 40:
-            b[0] = 1
-        # doors: closed door right in front on our path -> one USE press, then wait
-        hit = np.asarray(obs["rays"]["hit_type"])
-        dist = np.asarray(obs["rays"]["distance"])
+            return self._finish(b)
         nxt = self.path[0]
         door_next = self.grid[nxt[0]][nxt[1]] in "DBYR"
-        self.use_cool -= 1
-        if door_next and hit[0] in (2, 3) and dist[0] < 0.12 and self.use_cool <= 0 and not self.prev_use:
-            b[7] = 1
-            self.use_cool = 12
-        self.prev_use = int(b[7])
-        return b
+        tgt = nxt
+        if not door_next:
+            for k in range(min(5, len(self.path))):
+                p = self.path[k]
+                if self.grid[p[0]][p[1]] in "DBYR":
+                    break
+                cx, cy = self.center(p)
+                if self._clear(x, y, cx, cy):
+                    tgt = p
+        tx, ty = self.center(tgt)
+        err = wrap_deg(math.degrees(math.atan2(ty - y, tx - x) - th))
+        self._turn_towards(b, err, tol=4.0)
+        if abs(err) < 50:
+            b[0] = 1
+        elif abs(err) < 100:
+            b[2 if err > 0 else 3] = 1  # strafe-turn round corners instead of stopping
+        # doors: face the door and press USE once, then wait for it to open
+        if door_next:
+            hit = np.asarray(obs["rays"]["hit_type"])
+            dist = np.asarray(obs["rays"]["distance"])
+            dx, dy = tx - x, ty - y
+            close = math.hypot(dx, dy) < 110
+            closed_ahead = hit[0] in (2, 3) and dist[0] < 0.15
+            if close and abs(err) < 25 and closed_ahead and self.use_cool <= 0 and not self.prev_use:
+                b[7] = 1
+                self.use_cool = 14
+            if closed_ahead and dist[0] < 0.05:
+                b[0] = 0  # don't grind into the door while it opens
+        return self._finish(b)
 
 
 def evaluate(episodes: int, stage: int, seed: int = 0):
