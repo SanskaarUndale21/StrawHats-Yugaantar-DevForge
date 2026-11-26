@@ -43,6 +43,21 @@ def _fixture_lumps():
     return out
 
 
+def _make_env_retry(wad, name, tries=6):
+    """ViZDoom instances started at the same instant can race on shared files; retry with jitter."""
+    import time
+
+    from doom_env import make_env
+
+    for k in range(tries):
+        try:
+            return make_env(wad, name, render_buffers=False)
+        except Exception:
+            if k == tries - 1:
+                raise
+            time.sleep(0.5 + random.random() * 2.0)
+
+
 MAPS_PER_WAD = 32
 GEN_PER_WAD = 29  # MAP01..MAP29 generated, MAP30..MAP32 hand-made fixtures
 
@@ -96,7 +111,7 @@ class _Slot:
         write_wad(self.wad_path, lumps)
         if self.env is not None:
             self.env.close()
-        self.env = make_env(self.wad_path, "MAP01", render_buffers=False)
+        self.env = _make_env_retry(self.wad_path, "MAP01")
         if old is not None:
             try:
                 old.unlink()
@@ -133,7 +148,7 @@ class _Slot:
 
             if self.fd_env is None:
                 iwad = os.path.join(os.path.dirname(vd.__file__), "freedoom2.wad")
-                self.fd_env = make_env(iwad, "MAP01", render_buffers=False)
+                self.fd_env = _make_env_retry(iwad, "MAP01")
             self._switch(self.fd_env, f"MAP{self.rng.randint(1, 32):02d}", 4200)
             self.tags = ["freedoom"]
             return self.fd_env
@@ -205,6 +220,9 @@ class _Slot:
 
 
 def _worker(remote, wid, n, ctl, seed):
+    import time
+
+    time.sleep(0.4 * wid)  # stagger engine start-up across workers
     _hires_timer()
     import torch  # noqa: F401  (keeps thread settings consistent)
 
@@ -238,6 +256,7 @@ class VecDoom:
     def __init__(self, workers: int, envs_per_worker: int, seed: int = 0, mode: int = 0):
         """mode 0: RL only; 1: RL + teacher labels (BC regulariser); 2: DAgger distillation."""
         ctx = mp.get_context("spawn")
+        os.makedirs("_vizdoom", exist_ok=True)  # ViZDoom creates it on start; avoid a creation race
         self.stage = ctx.Value("i", 0)
         self.beta = ctx.Value("d", 0.0)
         self.mode = ctx.Value("i", mode)

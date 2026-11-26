@@ -231,3 +231,4 @@ training/runs/
 .claude/
 training/aws/.instance*
 env/**/__pycache__/
+_vizdoom/
