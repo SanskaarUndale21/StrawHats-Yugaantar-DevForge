@@ -142,79 +142,104 @@ class SlamView:
             if np.hypot(dr[0] - mem.x, dr[1] - mem.y) < 44:
                 dr[4] = True
 
+    # colours (BGR), dark theme
+    C_FREE, C_WALL = (58, 50, 44), (255, 255, 255)
+    C_PATH, C_SCAN, C_AGENT = (255, 190, 70), (90, 90, 255), (0, 165, 255)
+    C_DOOR, C_LOCK, C_KEY, C_TEXT = (90, 225, 90), (80, 80, 255), (0, 215, 255), (235, 235, 235)
+
+    @staticmethod
+    def _label(img, text, org, col, scale=0.42):
+        """Small caption with a dark outline so it stays readable on any background."""
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, col, 1, cv2.LINE_AA)
+
     def render(self, mem, size=PANEL):
+        HEAD, FOOT = 40, 46
         known = np.abs(self.lo) > 0.2
         ys, xs = np.nonzero(known)
         if len(xs) == 0:
-            return np.full((size, size, 3), 205, np.uint8)
+            return np.zeros((size, size, 3), np.uint8)
         x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
-        side = int(max(x1 - x0, y1 - y0, 150) + 24)
+        side = int(max(x1 - x0, y1 - y0, 150) + 30)
         cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
         ox, oy = int(np.clip(cx - side // 2, 0, self.N - side)), int(np.clip(cy - side // 2, 0, self.N - side))
         lo = self.lo[oy:oy + side, ox:ox + side]
-        k = size / side
-        # log-odds -> grey: unknown 205, free up to 254, occupied down to 0 (the usual map colours)
+        body = size - HEAD - FOOT                       # the map itself sits between header and legend
+        k = body / side
+        # log-odds -> colour: unexplored black, free space dark, walls white (brighter = more certain)
         t = np.clip(lo / 2.0, -1.0, 1.0)
-        g = np.where(t < 0, 205 + (-t) * 49, 205 * (1 - t)).astype(np.uint8)
-        img = cv2.cvtColor(cv2.resize(g, (size, size), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
+        free, occ = np.clip(-t, 0, 1)[..., None], np.clip(t, 0, 1)[..., None]
+        grid = (free * np.array(self.C_FREE) + occ * np.array(self.C_WALL)).astype(np.uint8)
+        grid = cv2.resize(grid, (body, body), interpolation=cv2.INTER_NEAREST)
+        img = np.zeros((size, size, 3), np.uint8)
+        xoff = (size - body) // 2
+        m = img[HEAD:HEAD + body, xoff:xoff + body]
+        m[:] = grid
 
         def out(x, y):
             return np.rint((self._px(x, y) - (ox, oy)) * k).astype(np.int32)
 
-        step = 256.0                                       # metric grid, every 256 map units
-        gx0 = (ox - self.N / 2) * self.R
-        gy1 = (self.N / 2 - oy) * self.R
-        for v in np.arange(np.ceil(gx0 / step) * step, gx0 + side * self.R, step):
-            X = int((v - gx0) / self.R * k)
-            cv2.line(img, (X, 0), (X, size), (188, 188, 188), 1)
-        for v in np.arange(np.floor(gy1 / step) * step, gy1 - side * self.R, -step):
-            Y = int((gy1 - v) / self.R * k)
-            cv2.line(img, (0, Y), (size, Y), (188, 188, 188), 1)
+        def pt(x, y):
+            a = out(x, y)
+            return int(a[0]), int(a[1])
+
         if len(self.path) > 1:
             p = np.array(self.path)
-            cv2.polylines(img, [out(p[:, 0], p[:, 1])], False, (200, 90, 0), 1, cv2.LINE_AA)
-        c = out(mem.x, mem.y)
-        c = (int(c[0]), int(c[1]))
-        if len(self.scan):                                 # the current scan: beams and hit points
+            cv2.polylines(m, [out(p[:, 0], p[:, 1])], False, self.C_PATH, 1, cv2.LINE_AA)
+        c = pt(mem.x, mem.y)
+        if len(self.scan):                              # this instant's laser scan: beams and hit points
             q = out(self.scan[:, 0], self.scan[:, 1])
-            ov = img.copy()
+            ov = m.copy()
             for a in q:
-                cv2.line(ov, c, (int(a[0]), int(a[1])), (60, 60, 255), 1, cv2.LINE_AA)
-            img = cv2.addWeighted(ov, 0.18, img, 0.82, 0)
+                cv2.line(ov, c, (int(a[0]), int(a[1])), self.C_SCAN, 1, cv2.LINE_AA)
+            m[:] = cv2.addWeighted(ov, 0.22, m, 0.78, 0)
             for a in q:
-                cv2.circle(img, (int(a[0]), int(a[1])), 2, (0, 0, 230), -1, cv2.LINE_AA)
+                cv2.circle(m, (int(a[0]), int(a[1])), 2, self.C_SCAN, -1, cv2.LINE_AA)
+        if self.path:                                   # where the episode began
+            s0 = pt(*self.path[0])
+            cv2.circle(m, s0, 6, self.C_TEXT, 1, cv2.LINE_AA)
+            self._label(m, "START", (s0[0] + 9, s0[1] + 4), self.C_TEXT)
         for x, y, n, locked, opened in self.doors:
             if n < 3:
                 continue
-            a = out(x, y)
-            col = (0, 0, 200) if locked else (0, 150, 0)
-            cv2.rectangle(img, (int(a[0]) - 5, int(a[1]) - 5), (int(a[0]) + 5, int(a[1]) + 5), col, 1 if opened else -1)
+            a = pt(x, y)
+            col = self.C_LOCK if locked else self.C_DOOR
+            cv2.rectangle(m, (a[0] - 6, a[1] - 6), (a[0] + 6, a[1] + 6), col, 2 if opened else -1, cv2.LINE_AA)
+            name = ("LOCKED DOOR" if locked else "DOOR") + (" (opened)" if opened else "")
+            self._label(m, name, (a[0] + 10, a[1] + 4), col)
         for kx, ky in mem.keys.values():
-            a = out(kx, ky)
-            cv2.drawMarker(img, (int(a[0]), int(a[1])), (0, 170, 230), cv2.MARKER_DIAMOND, 10, 2, cv2.LINE_AA)
-        # pose: heading triangle
-        th = mem.th
-        tri = np.array([[14 * np.cos(th), -14 * np.sin(th)], [9 * np.cos(th + 2.5), -9 * np.sin(th + 2.5)],
-                        [9 * np.cos(th - 2.5), -9 * np.sin(th - 2.5)]]) + c
-        cv2.fillPoly(img, [np.rint(tri).astype(np.int32)], (0, 0, 255), cv2.LINE_AA)
-        cv2.polylines(img, [np.rint(tri).astype(np.int32)], True, (0, 0, 0), 1, cv2.LINE_AA)
-        # header, scale bar, legend
-        cv2.rectangle(img, (0, 0), (size, 20), (40, 40, 40), -1)
-        cells = int(known.sum())
-        cv2.putText(img, f"occupancy grid  {self.R:.0f} u/cell  scans {self.steps}  known {cells} cells  "
-                         f"pose ({mem.x:.0f}, {mem.y:.0f}, {np.degrees(mem.th) % 360:.0f} deg)", (6, 14),
-                    cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
-        bar = int(256 / self.R * k)
-        cv2.rectangle(img, (0, size - 20), (size, size), (40, 40, 40), -1)
-        cv2.line(img, (8, size - 10), (8 + bar, size - 10), (255, 255, 255), 2)
-        cv2.putText(img, "256 u", (14 + bar, size - 5), cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
-        x = 70 + bar
-        for name, col in (("free", (254, 254, 254)), ("occupied", (0, 0, 0)), ("unknown", (205, 205, 205)),
-                          ("scan", (0, 0, 230)), ("path", (200, 90, 0)), ("door", (0, 150, 0)), ("locked", (0, 0, 200))):
-            cv2.rectangle(img, (x, size - 15), (x + 9, size - 6), col, -1)
-            cv2.rectangle(img, (x, size - 15), (x + 9, size - 6), (120, 120, 120), 1)
-            cv2.putText(img, name, (x + 13, size - 5), cv2.FONT_HERSHEY_PLAIN, 0.9, (230, 230, 230), 1, cv2.LINE_AA)
-            x += 20 + cv2.getTextSize(name, cv2.FONT_HERSHEY_PLAIN, 0.9, 1)[0][0]
+            a = pt(kx, ky)
+            cv2.drawMarker(m, a, self.C_KEY, cv2.MARKER_DIAMOND, 12, 2, cv2.LINE_AA)
+            self._label(m, "KEYCARD", (a[0] + 10, a[1] + 4), self.C_KEY)
+        th = mem.th                                     # the agent: a heading arrow
+        tri = np.array([[15 * np.cos(th), -15 * np.sin(th)], [10 * np.cos(th + 2.5), -10 * np.sin(th + 2.5)],
+                        [10 * np.cos(th - 2.5), -10 * np.sin(th - 2.5)]]) + c
+        cv2.fillPoly(m, [np.rint(tri).astype(np.int32)], self.C_AGENT, cv2.LINE_AA)
+        cv2.polylines(m, [np.rint(tri).astype(np.int32)], True, (0, 0, 0), 1, cv2.LINE_AA)
+        self._label(m, "AGENT", (c[0] + 14, c[1] - 10), self.C_AGENT)
+        bar = int(256 / self.R * k)                     # scale bar inside the map, bottom left
+        cv2.line(m, (10, body - 12), (10 + bar, body - 12), self.C_TEXT, 2, cv2.LINE_AA)
+        self._label(m, "256 map units", (16 + bar, body - 8), self.C_TEXT)
+
+        # header
+        cv2.putText(img, "SLAM OCCUPANCY MAP", (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        explored = int((lo < -0.2).sum() * self.R * self.R / 4096)   # in 64x64-unit floor tiles
+        info = (f"Scans: {self.steps}    Explored floor: {explored} tiles    Position: ({mem.x:.0f}, {mem.y:.0f})    "
+                f"Heading: {np.degrees(mem.th) % 360:.0f} deg")
+        cv2.putText(img, info, (10, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+        cv2.line(img, (0, HEAD - 1), (size, HEAD - 1), (60, 60, 60), 1)
+        # legend, two rows
+        cv2.line(img, (0, size - FOOT), (size, size - FOOT), (60, 60, 60), 1)
+        rows = ((("Unexplored", (0, 0, 0)), ("Free space", self.C_FREE), ("Wall", self.C_WALL), ("Laser scan", self.C_SCAN),
+                 ("Path travelled", self.C_PATH)),
+                (("Agent", self.C_AGENT), ("Door", self.C_DOOR), ("Locked door", self.C_LOCK), ("Keycard", self.C_KEY)))
+        for r, items in enumerate(rows):
+            x, y = 10, size - FOOT + 17 + 19 * r
+            for name, col in items:
+                cv2.rectangle(img, (x, y - 10), (x + 11, y + 1), col, -1)
+                cv2.rectangle(img, (x, y - 10), (x + 11, y + 1), (150, 150, 150), 1)
+                cv2.putText(img, name, (x + 17, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, self.C_TEXT, 1, cv2.LINE_AA)
+                x += 32 + cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
         return img
 
 
@@ -288,7 +313,7 @@ def main():
     live_mtime, live_step = 0.0, "?"
     agent, writer, quit_ = None, None, False
     realtime, paused = True, False
-    names = ["FWD", "BACK", "SL", "SR", "TL", "TR", "FIRE", "USE", "WPN"]
+    names = ["Forward", "Back", "Strafe left", "Strafe right", "Turn left", "Turn right", "Fire", "Use", "Next weapon"]
     for ep, (wad, mapname, tags, L, ticks) in enumerate(levels):
         env = make_env(wad, mapname, episode_ticks=ticks, render_buffers=True)
         # no status bar or engine crosshair: the agent reads this same picture to recognise the exit
@@ -343,18 +368,20 @@ def main():
             frame = cv2.resize(cv2.cvtColor(obs["rgb"], cv2.COLOR_RGB2BGR), (W, H), interpolation=cv2.INTER_NEAREST)
             panel = cv2.resize(slam.render(agent.memory), (H, H), interpolation=cv2.INTER_LINEAR)
             v = obs["vitals"]
-            rooms = f"{m['rooms_seen']}/{m['rooms_total']}" if L is not None else f"{m['rooms_seen']}"
-            aim = f"{100 * m['acc']:.0f}%" if m["shots"] else "-"
-            lines = [f"{' '.join(tags)}  game {ep + 1}{total}  step {t}" + (f"  train step {live_step}" if a.live else ""),
-                     f"health {v[0]:.0f}  armor {v[1]:.0f}  ammo {v[3]:.0f}",
-                     f"kills {ps['kills']}/{m['monsters']}  aim {aim} ({m['shots']} shots)",
-                     f"rooms {rooms}  cleared {m['rooms_cleared']}/{m['rooms_hostile']}",
-                     f"keys {int(v[8:14].sum())}  gun swaps {m['wpn_switches']}  secrets {m['secrets']}",
-                     "act: " + " ".join(n for n, b in zip(names, act) if b),
-                     "EXIT REACHED" if info.get("exit_reached") else ("DEAD" if ps["dead"] else ("TIME UP" if done else ""))]
+            rooms = f"{m['rooms_seen']} / {m['rooms_total']}" if L is not None else f"{m['rooms_seen']}"
+            aim = f"{100 * m['acc']:.0f}%" if m["shots"] else "n/a"
+            pressed = [n for n, on in zip(names, act) if on]
+            result = "EXIT REACHED" if info.get("exit_reached") else ("DIED" if ps["dead"] else ("TIME RAN OUT" if done else "PLAYING"))
+            lines = [f"Level: {' '.join(tags).title()}    Game {ep + 1}{total}    Step {t}" + (f"    Training step {live_step}" if a.live else ""),
+                     f"Health: {v[0]:.0f}    Armor: {v[1]:.0f}    Ammo: {v[3]:.0f}",
+                     f"Enemies killed: {ps['kills']} / {m['monsters']}    Aim accuracy: {aim} ({m['shots']} shots)",
+                     f"Rooms explored: {rooms}    Rooms cleared: {m['rooms_cleared']} / {m['rooms_hostile']}",
+                     f"Keycards held: {int(v[8:14].sum())}    Weapon swaps: {m['wpn_switches']}    Secrets found: {m['secrets']}",
+                     "Action: " + (" + ".join(pressed) if pressed else "none"),
+                     f"Status: {result}"]
             cv2.drawMarker(frame, (W // 2, H // 2), (0, 255, 0), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
             ov = frame.copy()  # stats box on top of the game picture
-            cv2.rectangle(ov, (0, 0), (430, 14 + 24 * len(lines)), (0, 0, 0), -1)
+            cv2.rectangle(ov, (0, 0), (max(cv2.getTextSize(x, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0] for x in lines) + 22, 14 + 24 * len(lines)), (0, 0, 0), -1)
             frame = cv2.addWeighted(ov, 0.6, frame, 0.4, 0)
             for i, txt in enumerate(lines):
                 cv2.putText(frame, txt, (10, 24 + 24 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
