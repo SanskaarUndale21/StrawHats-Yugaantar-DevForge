@@ -88,7 +88,7 @@ def _run_one(job):
     from rewards import RewardShaper
 
     wad, name, L, T = _make_level(spec)
-    env = make_env(wad, name, episode_ticks=T, render_buffers=False)
+    env = make_env(wad, name, episode_ticks=T, render_buffers=True)
     obs, _ = env.reset(seed=seed)
     if who == "teacher":
         if L is None:
@@ -103,11 +103,10 @@ def _run_one(job):
 
         agent = DoomAgent(env.observation_space, env.action_space, "cpu")
         if weights:
-            from train import RunningStat  # RL checkpoints pickle it as __main__.RunningStat
+            from common import load_checkpoint
+            from model import load_compatible
 
-            setattr(sys.modules["__main__"], "RunningStat", RunningStat)
-            ck = torch.load(weights, map_location="cpu", weights_only=False)
-            agent.net.load_state_dict(ck["model"] if "model" in ck else ck)
+            load_compatible(agent.net, load_checkpoint(weights)["model"])
         agent.reset()
         act = agent.act
     shaper = RewardShaper()

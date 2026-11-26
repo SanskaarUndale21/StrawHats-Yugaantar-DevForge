@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
-FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask")
+FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb")
 
 
 def _hires_timer():
@@ -51,7 +51,7 @@ def _make_env_retry(wad, name, tries=6):
 
     for k in range(tries):
         try:
-            return make_env(wad, name, render_buffers=False)
+            return make_env(wad, name, render_buffers=True)
         except Exception:
             if k == tries - 1:
                 raise

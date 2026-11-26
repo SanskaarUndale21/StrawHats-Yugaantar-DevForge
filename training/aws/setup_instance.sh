@@ -3,6 +3,7 @@
 # Usage: bash setup_instance.sh [repo_url]
 set -euo pipefail
 REPO_URL="${1:-https://github.com/SanskaarUndale21/StrawHats-Yugaantar-DevForge.git}"
+BRANCH="${2:-main}"
 
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git git-lfs tmux htop libgl1 libglib2.0-0 >/dev/null
@@ -15,7 +16,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 cd "$HOME"
 if [ ! -d doom ]; then
-  git clone -q "$REPO_URL" doom
+  git clone -q -b "$BRANCH" "$REPO_URL" doom
 fi
 cd doom
 git pull -q || true

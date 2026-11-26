@@ -106,10 +106,11 @@ def main():
                 pass
     agent = DoomAgent(env.observation_space, env.action_space, "cpu")
     if a.weights:
-        import torch
+        from common import load_checkpoint
+        from model import load_compatible
 
-        ck = torch.load(a.weights, map_location="cpu", weights_only=False)
-        agent.net.load_state_dict(ck["model"] if "model" in ck else ck)
+        ck = load_checkpoint(a.weights)
+        load_compatible(agent.net, ck["model"])
         print(f"loaded {a.weights} (step {ck.get('step', '?')})")
     H0, W0 = env._game.get_screen_height(), env._game.get_screen_width()
     scale = max(1, 800 // W0)

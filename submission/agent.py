@@ -17,7 +17,7 @@ WEIGHTS_DIR = SUBMISSION_DIR / "weights"
 if str(SUBMISSION_DIR) not in sys.path:
     sys.path.insert(0, str(SUBMISSION_DIR))
 
-from model import DoomNet, obs_to_torch, split_logits, to_buttons  # noqa: E402
+from model import DoomNet, load_compatible, obs_to_torch, split_logits, to_buttons  # noqa: E402
 from spatial_memory import SpatialMemory  # noqa: E402
 
 
@@ -32,7 +32,7 @@ class DoomAgent:
         path = WEIGHTS_DIR / "doomnet.pt"
         if path.exists():
             ckpt = torch.load(path, map_location=self.device, weights_only=True)
-            self.net.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
+            load_compatible(self.net, ckpt["model"] if "model" in ckpt else ckpt)
         self.gen = torch.Generator().manual_seed(0)
         self.memory = SpatialMemory()
         self.reset()

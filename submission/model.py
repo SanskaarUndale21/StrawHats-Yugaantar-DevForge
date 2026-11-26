@@ -1,8 +1,9 @@
-"""DoomNet: spatial-memory recurrent actor-critic (bespoke, ~1.4M params, CPU-friendly).
+"""DoomNet: spatial-memory recurrent actor-critic (bespoke, ~1.3M params, CPU-friendly).
 
 Inputs (built by spatial_memory.SpatialMemory):
   rays     (9, 64)        per-ray distance, proximity, hit-type one-hot, already-visited fraction
-  map      (14, 21, 21)   ego-centric, heading-aligned crops of the remembered map at 2 scales
+  map      (16, 21, 21)   ego-centric, heading-aligned crops of the remembered map at 2 scales
+  rgb      (3, 30, 40)    low-res colour thumbnail (uint8)
   vec      (49,)          vitals, previous action, pointers to remembered locked door/door/keycard
   ent      (32, 5) + ent_type (32,) + ent_mask (32,)   variable-size set of visible entities
 
@@ -24,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 14, 21, 49, 32, 12
+RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 16, 21, 49, 32, 12
 HEADS = (3, 3, 3, 2, 2, 2)  # move, strafe, turn, attack, use, weapon
 HIDDEN = 256
 
@@ -80,6 +81,25 @@ class MapEncoder(nn.Module):
         return F.relu(self.fc(x.flatten(1)))
 
 
+class PixelEncoder(nn.Module):
+    """Tiny CNN over a 30x40 colour thumbnail. The rays say nothing about floor textures, so this is
+    how the agent recognises the exit pad (and keycard colours) when they are in view."""
+
+    def __init__(self, out=64):
+        super().__init__()
+        self.c1 = nn.Conv2d(3, 16, 5, stride=2, padding=2)   # 15x20
+        self.c2 = nn.Conv2d(16, 32, 3, stride=2, padding=1)  # 8x10
+        self.c3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)  # 4x5
+        self.fc = nn.Linear(32 * 4 * 5, out)
+
+    def forward(self, x):
+        x = x.float() / 255.0 - 0.5
+        x = F.relu(self.c1(x))
+        x = F.relu(self.c2(x))
+        x = F.relu(self.c3(x))
+        return F.relu(self.fc(x.flatten(1)))
+
+
 class DoomNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -87,7 +107,8 @@ class DoomNet(nn.Module):
         self.ents = EntitySetPool(64, 4, 128)
         self.map = MapEncoder(192)
         self.vec = nn.Sequential(nn.Linear(VEC_DIM, 128), nn.ReLU())
-        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128, HIDDEN), nn.ReLU())
+        self.pix = PixelEncoder(64)
+        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128 + 64, HIDDEN), nn.ReLU())
         self.gru = nn.GRU(HIDDEN, HIDDEN)
         self.pi = nn.Linear(HIDDEN + HIDDEN, sum(HEADS))
         self.v = nn.Linear(HIDDEN + HIDDEN, 1)
@@ -98,7 +119,8 @@ class DoomNet(nn.Module):
 
     def encode(self, o):
         e = torch.cat([self.rays(o["rays"]), self.ents(o["ent"], o["ent_type"], o["ent_mask"]),
-                       self.map(o["map"]), self.vec(o["vec"])], -1)
+                       self.map(o["map"].float() if o["map"].dtype != torch.uint8 else o["map"].float() / 255.0),
+                       self.vec(o["vec"]), self.pix(o["rgb"])], -1)
         return self.fuse(e)
 
     def forward(self, o, h, done=None):
@@ -148,6 +170,16 @@ def to_buttons(choice):
     out[..., 7] = c[..., 4] == 1
     out[..., 8] = c[..., 5] == 1
     return out
+
+
+def load_compatible(net: nn.Module, state: dict) -> list:
+    """Load every tensor whose name and shape match (lets a checkpoint from an older input layout
+    warm-start a newer network). Returns the names that were skipped."""
+    own = net.state_dict()
+    ok = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    own.update(ok)
+    net.load_state_dict(own)
+    return [k for k in own if k not in ok]
 
 
 def obs_to_torch(feats: dict, device) -> dict:

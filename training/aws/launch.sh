@@ -69,14 +69,14 @@ $SSH "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1 || true"
 echo "self-terminate timer: $MAX_HOURS h"
 
 scp -i "$KEYFILE" -o StrictHostKeyChecking=no training/aws/setup_instance.sh ubuntu@$IP:~/
-$SSH "bash ~/setup_instance.sh"
+$SSH "bash ~/setup_instance.sh https://github.com/SanskaarUndale21/StrawHats-Yugaantar-DevForge.git ${BRANCH:-main}"
 # carry local progress over (whatever exists)
 for f in $UPLOAD; do
   if [ -f "training/checkpoints/$f" ]; then
     scp -i "$KEYFILE" -o StrictHostKeyChecking=no "training/checkpoints/$f" ubuntu@$IP:~/doom/training/checkpoints/
   fi
 done
-$SSH "tmux new-session -d -s train 'bash ~/doom/training/aws/run.sh $PHASE 8000000 150000000 ${SEED:-1}; bash'"
+$SSH "tmux new-session -d -s train 'bash ~/doom/training/aws/run.sh $PHASE ${DSTEPS:-8000000} 300000000 ${SEED:-1}; bash'"
 echo
 echo "training started on $TYPE ($MARKET)  id=$ID  ip=$IP"
 echo "  watch:   $SSH -t tmux attach -t train      (detach: Ctrl-b d)"

@@ -9,8 +9,8 @@ DSTEPS="${2:-8000000}"
 RSTEPS="${3:-150000000}"
 SEED="${4:-1}"
 CORES=$(nproc)
-WORKERS=$(( CORES > 16 ? CORES - 10 : (CORES > 4 ? CORES - 2 : CORES) ))
-export LEARNER_THREADS=$(( CORES > 16 ? 8 : 2 ))
+WORKERS=$(( CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES) ))
+export LEARNER_THREADS=$(( CORES > 16 ? 12 : 1 ))
 CK=training/checkpoints
 echo "cores=$CORES workers=$WORKERS phase=$PHASE"
 
@@ -19,7 +19,7 @@ distill() {
   if [ -f $CK/distill.pt ]; then extra="--resume";
   elif [ -f $CK/student.pt ]; then extra="--init $CK/student.pt";
   elif [ -f $CK/latest.pt ]; then extra="--init $CK/latest.pt"; fi
-  uv run python -u training/distill.py --workers $WORKERS --envs-per-worker 2 --steps $DSTEPS --seed $SEED $extra 2>&1 | tee -a $CK/distill.out
+  uv run python -u training/distill.py --workers $WORKERS --envs-per-worker 2 --steps $DSTEPS --beta-steps $(( DSTEPS / 2 )) --seed $SEED $extra 2>&1 | tee -a $CK/distill.out
 }
 
 rl() {

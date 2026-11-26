@@ -65,6 +65,7 @@ class Teacher:
 
     def reset(self):
         self.seen = np.zeros((self.h, self.w), bool)
+        self.seen_front = np.zeros((self.h, self.w), bool)  # seen inside the 90 degree field of view
         self.taken = set()
         self.path = []
         self.goal = None
@@ -108,7 +109,16 @@ class Teacher:
         cc = np.floor(np.concatenate([px, hx]) / CELL).astype(int)
         ok = (rr >= 0) & (rr < self.h) & (cc >= 0) & (cc < self.w)
         self.seen[rr[ok], cc[ok]] = True
+        # what the student can also recognise (pixels / visible_entities): front rays only, <= 900 units
+        fr = np.r_[57:64, 0:8]
+        mf = SAMPLES[None, :] <= np.minimum(d[fr], 900.0)[:, None]
+        fx = (x + np.cos(ang[fr])[:, None] * SAMPLES[None, :])[mf]
+        fy = (y + np.sin(ang[fr])[:, None] * SAMPLES[None, :])[mf]
+        fr_, fc_ = np.floor(-fy / CELL).astype(int), np.floor(fx / CELL).astype(int)
+        okf = (fr_ >= 0) & (fr_ < self.h) & (fc_ >= 0) & (fc_ < self.w)
+        self.seen_front[fr_[okf], fc_[okf]] = True
         r0, c0 = self.cell_of(x, y)
+        self.seen_front[r0, c0] = True
         self.seen[max(r0 - 1, 0):r0 + 2, max(c0 - 1, 0):c0 + 2] = True
 
     def _has_key(self, vit, col):
@@ -158,11 +168,11 @@ class Teacher:
 
     def _plan(self, start, vit):
         prev, dist = self._bfs_all(start, vit)
-        if self.exit is not None and self.exit in dist:
+        if self.exit is not None and self.exit in dist and self.seen_front[self.exit]:
             return self._path(prev, self.exit, start), "exit"
         need = {ch for r in range(self.h) for c in range(self.w)
                 if (ch := self.grid[r][c]) in LOCK_KEYS and self.seen[r, c] and not self._has_key(vit, ch)}
-        want = [rc for rc, col in self.keys.items() if rc in dist and rc not in self.taken
+        want = [rc for rc, col in self.keys.items() if rc in dist and rc not in self.taken and self.seen_front[rc]
                 and (col in need or not self._has_key(vit, col))]
         if want:
             g = min(want, key=dist.get)

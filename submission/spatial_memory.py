@@ -8,7 +8,7 @@ The observation has no global coordinates, so the agent keeps its own private fr
 Every step the 64 rays paint free space / walls / doors / locked doors into a toroidal grid at two
 resolutions (64 and 256 map units per cell); keycards and pickups seen in `visible_entities` are
 projected into the grid; the cells the agent stands on accumulate visit counts. The policy reads an
-ego-centric, heading-aligned crop of both scales (a 14-channel image), per-ray "already visited"
+ego-centric, heading-aligned crop of both scales (a 16-channel image), per-ray "already visited"
 fractions, and pointers to the nearest remembered locked door / closed door / keycard. Everything is
 plain numpy and runs in well under a millisecond, identically in training workers and at evaluation.
 """
@@ -31,8 +31,9 @@ CROP = 21
 HALF = CROP // 2
 
 # map channels
-C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM = range(7)
-N_MAP_CH = 7
+C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM, C_FRONT = range(8)
+N_MAP_CH = 8
+RGB_H, RGB_W = 30, 40  # low-res colour view (exit pads and keycards are only recognisable by colour)
 
 RAY_WALL, RAY_DOOR, RAY_LOCK, RAY_ENEMY, RAY_ITEM = 1, 2, 3, 4, 5
 ENT_KEY = 9
@@ -177,10 +178,27 @@ class SpatialMemory:
         if any(vit[8:14] > 0):
             self.keys.clear()  # holding a key: stop chasing remembered keycards
 
+        self._frontier(self.fine)
+        self._frontier(self.coarse)
         feats_out = self._features(obs, vit, dist, hit, visited_frac, feats, etype, mask)
+        rgb = obs.get("rgb")
+        if rgb is None:
+            feats_out["rgb"] = np.zeros((3, RGB_H, RGB_W), np.uint8)
+        else:  # 4x4 area average of the 120x160 frame -> (3, 30, 40) uint8
+            small = np.asarray(rgb, np.float32).reshape(RGB_H, 4, RGB_W, 4, 3).mean((1, 3))
+            feats_out["rgb"] = small.transpose(2, 0, 1).astype(np.uint8)
         if action is not None:
             self.prev_action = np.asarray(action, np.float32)
         return feats_out
+
+    @staticmethod
+    def _frontier(g: np.ndarray) -> None:
+        """Frontier channel: known free cells that touch space never observed (plain map filtering,
+        no path planning). Tells the policy where unexplored space begins."""
+        known = (g[C_FREE] > 0) | (g[C_WALL] > 0) | (g[C_DOOR] > 0) | (g[C_LOCK] > 0)
+        unk = ~known
+        near = np.roll(unk, 1, 0) | np.roll(unk, -1, 0) | np.roll(unk, 1, 1) | np.roll(unk, -1, 1)
+        g[C_FRONT] = ((g[C_FREE] > 0) & (g[C_WALL] == 0) & near).astype(np.float32)
 
     # ------------------------------------------------------------------ features
     def _crop(self, grid: np.ndarray, cell: float, g: int) -> np.ndarray:
