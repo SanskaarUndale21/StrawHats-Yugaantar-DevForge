@@ -325,7 +325,40 @@ def generate(spec: LevelSpec, seed: int) -> Layout | None:
         cell = free.pop(rng.randrange(len(free)))
         t = rng.choices([i[0] for i in ITEMS], weights=[i[1] for i in ITEMS])[0]
         L.things.append((t, cell[0], cell[1], 0))
-    return L
+    return L if solvable(L) else None  # an unfinishable level is discarded; the caller draws another
+
+
+def solvable(L: Layout) -> bool:
+    """Can the level be finished? Walk from the player start, pick up every keycard that can be
+    reached with the keys held so far, and repeat until the exit is reachable or nothing new is.
+    (Two-lock levels used to come out with a keycard shut behind a door it was needed for: 25% of
+    two-lock gauntlets and 16% of two-lock key levels could not be completed by anyone.)"""
+    start = next(((r, c) for t, r, c, _ in L.things if t == 1), None)
+    goal = next(((r, c) for r in range(L.h) for c in range(L.w) if L.g[r][c] == "E"), None)
+    if start is None or goal is None:
+        return True  # nothing to finish (arena without an exit): not this check's business
+    colour = {v[0]: k for k, v in KEYS.items()}
+    keys = {(r, c): colour[t] for t, r, c, _ in L.things if t in colour}
+    held: set = set()
+    while True:
+        seen, stack = {start}, [start]
+        while stack:
+            r, c = stack.pop()
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                n = (r + dr, c + dc)
+                if n in seen or not L.inside(*n):
+                    continue
+                ch = L.g[n[0]][n[1]]
+                if ch == "#" or (ch in KEYS and ch not in held):
+                    continue
+                seen.add(n)
+                stack.append(n)
+        if goal in seen:
+            return True
+        new = {col for rc, col in keys.items() if rc in seen} - held
+        if not new:
+            return False
+        held |= new
 
 
 # ----------------------------------------------------------------------------- UDMF writer
