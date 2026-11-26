@@ -90,6 +90,7 @@ def main():
     ap.add_argument("--target-kl", type=float, default=0.03,
                     help="stop updating on a batch once the policy moved this far from the one that played it")
     ap.add_argument("--exit-coef", type=float, default=0.5, help="weight of the exit detector's side loss")
+    ap.add_argument("--fresh-lr-mult", type=float, default=10.0, help="learning-rate multiplier for newly added modules")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
@@ -102,14 +103,22 @@ def main():
 
     net = DoomNet().to(dev)
     rnd = RND().to(dev)
-    opt = torch.optim.Adam(list(net.parameters()) + list(rnd.pred.parameters()), lr=a.lr, eps=1e-5)
+    # the freshly added parts (exit detector, critics, curiosity predictor) start from nothing and get
+    # a ten times larger step than the already trained policy, which is only being fine-tuned
+    fresh = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] in ("eye", "exit_head", "vpriv", "v")]
+    tuned = [p_ for n_, p_ in net.named_parameters() if n_.split(".")[0] not in ("eye", "exit_head", "vpriv", "v")]
+    opt = torch.optim.Adam([{"params": tuned}, {"params": fresh + list(rnd.pred.parameters()), "lr": a.lr * a.fresh_lr_mult}],
+                           lr=a.lr, eps=1e-5)
     rnd_obs, int_stat, ret_stat = RunningStat(RND_DIM), RunningStat(), RunningStat()
     step, stage, update = 0, a.stage, 0
     if a.resume and (ckdir / "latest.pt").exists():
         ck = load_checkpoint(ckdir / "latest.pt", dev)
         net.load_state_dict(ck["model"])
         rnd.load_state_dict(ck["rnd"])
-        opt.load_state_dict(ck["opt"])
+        try:
+            opt.load_state_dict(ck["opt"])
+        except ValueError:  # checkpoint from before the optimiser had two groups: start its statistics afresh
+            print("optimiser state not reused")
         rnd_obs.load(ck["rnd_obs"]), int_stat.load(ck["int_stat"]), ret_stat.load(ck["ret_stat"])
         step, stage, update = ck["step"], ck["stage"], ck["update"]
         print(f"resumed at step {step} stage {stage}")
