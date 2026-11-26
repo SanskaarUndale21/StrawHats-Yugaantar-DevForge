@@ -6,6 +6,7 @@ only turns raw observations into features (map painting, pose integration).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from model import DoomNet, load_compatible, obs_to_torch, split_logits, to_butto
 from spatial_memory import SpatialMemory  # noqa: E402
 
 
+TEMPERATURE = 1.0  # < 1 makes the sampled actions less jittery; chosen on the held-out benchmark
+
+
 class DoomAgent:
     def __init__(self, observation_space, action_space, device: str):
         self.observation_space = observation_space
@@ -34,6 +38,7 @@ class DoomAgent:
             ckpt = torch.load(path, map_location=self.device, weights_only=True)
             load_compatible(self.net, ckpt["model"] if "model" in ckpt else ckpt)
         self.gen = torch.Generator().manual_seed(0)
+        self.temperature = float(os.environ.get("DOOM_TEMP", TEMPERATURE))  # env override: experiments only
         self.memory = SpatialMemory()
         self.reset()
 
@@ -46,7 +51,9 @@ class DoomAgent:
     def act(self, observation: dict) -> np.ndarray:
         feats = self.memory.update(observation, self.last_action)
         logits, _, self.h, _ = self.net(obs_to_torch(feats, self.device), self.h)
-        choice = [torch.multinomial(torch.softmax(l, -1), 1, generator=self.gen).item() for l in split_logits(logits)]
+        # sample each action head from the network's own distribution, sharpened by TEMPERATURE
+        choice = [torch.multinomial(torch.softmax(l / self.temperature, -1), 1, generator=self.gen).item()
+                  for l in split_logits(logits)]
         action = to_buttons(np.array(choice))
         self.last_action = action
         return action
