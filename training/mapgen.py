@@ -46,7 +46,10 @@ MONSTERS = [  # (thing type, weight, min stage)
     (69, 1, 3),     # hell knight
 ]
 ITEMS = [(2011, 6), (2012, 3), (2007, 5), (2008, 4), (2048, 2), (2049, 1), (2018, 2), (2019, 1),
-         (2001, 2), (2002, 1), (2014, 4), (2015, 3)]
+         (2001, 2), (2002, 1), (2014, 4), (2015, 3),
+         # heavier guns and their ammo, so every weapon slot gets used in training:
+         # super shotgun, rocket launcher, rockets, box of rockets, plasma rifle, cell pack
+         (82, 1), (2003, 1), (2010, 2), (2046, 1), (2004, 1), (2047, 2)]
 
 
 @dataclass

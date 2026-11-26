@@ -278,9 +278,11 @@ class Teacher:
         if have is not None:
             # pick the best gun we own that has ammo: plasma, then shotgun up close / chaingun at range,
             # pistol last, fist only when everything is empty. SELECT_NEXT cycles through owned guns.
-            near = (not len(enemies)) or float(f[enemies, 0].min()) * 1024.0 < 450.0
-            order = (6, 3, 4, 2) if near else (6, 4, 3, 2)
-            ammo_of = {2: vit[4], 3: vit[5], 4: vit[4], 6: vit[7]}
+            nearest = float(f[enemies, 0].min()) * 1024.0 if len(enemies) else 0.0
+            near = nearest < 450.0
+            # rockets only from a safe distance (the blast hurts the shooter); never with nothing in sight
+            order = (6, 3, 4, 2) if near else ((5, 6, 4, 3, 2) if nearest > 380.0 else (6, 4, 3, 2))
+            ammo_of = {2: vit[4], 3: vit[5], 4: vit[4], 5: vit[6], 6: vit[7]}
             want = next((w for w in order if have[w] and ammo_of[w] > 0), 1)
             if int(vit[2]) == want:
                 self.wpn_tries = 0
