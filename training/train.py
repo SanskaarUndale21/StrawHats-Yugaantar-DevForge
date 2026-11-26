@@ -87,6 +87,8 @@ def main():
     ap.add_argument("--bc-coef", type=float, default=0.0, help="teacher behaviour-cloning regulariser weight")
     ap.add_argument("--bc-decay", type=int, default=20_000_000, help="steps over which bc-coef decays to 0")
     ap.add_argument("--critic-warmup", type=int, default=0, help="updates with the policy frozen (value head only)")
+    ap.add_argument("--target-kl", type=float, default=0.03,
+                    help="stop updating on a batch once the policy moved this far from the one that played it")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
@@ -189,7 +191,10 @@ def main():
         frac = min(step / a.steps, 1.0)
         mb = max(1, N // a.minibatches)
         stats = collections.defaultdict(list)
+        moved = False
         for _ in range(a.epochs):
+            if moved:
+                break
             perm = np.random.permutation(N)
             for i in range(0, N, mb):
                 idx = torch.as_tensor(perm[i : i + mb], device=dev)
@@ -213,6 +218,11 @@ def main():
                         bc = (bc * m).sum() / m.sum()
                         loss = loss + bc_w * bc
                         stats["bc"].append(bc.item())
+                kl_now = (LP[:, idx].reshape(-1) - logp).mean().item()
+                if pg_on and kl_now > 1.5 * a.target_kl and stats["pg"]:
+                    moved = True  # trust region: this batch has been used enough
+                    stats["early_stop"].append(1.0)
+                    break
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(net.parameters(), 0.5)
