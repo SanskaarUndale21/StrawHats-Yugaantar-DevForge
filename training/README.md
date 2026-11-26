@@ -1,107 +1,84 @@
 # Training pipeline (StrawHats)
 
+Everything here runs at training time only. The scorer loads `submission/` and nothing else.
+
 ```
-mapgen.py              procedural UDMF level generator + curriculum specs (combat / explore / keys / gauntlet)
-vec_env.py             multiprocess envs: fresh levels, SpatialMemory features, shaped rewards, aux targets
-rewards.py             reward shaping from privileged ground truth (training only)
-train.py               recurrent PPO + RND curiosity + auxiliary losses + curriculum (from scratch, no SB3)
-teacher.py             privileged scripted teacher (training only) that plans over cells it has already seen
-distill.py             DAgger teacher -> student distillation into the recurrent DoomNet
-watch.py               live viewer: game window + the agent's own memory map + stats
-aws/                   one-command cloud training (launch / status / fetch / terminate)
-calibrate_odometry.py  fits the odometry constants used by submission/spatial_memory.py
+mapgen.py          procedural UDMF level generator: combat / explore / keys / gauntlet, every level checked to be finishable
+vec_env.py         one environment slot: fresh levels, SpatialMemory features, shaped reward, side-task targets
+sampler.py         asynchronous actor pool (each actor owns envs and a policy copy; weights via shared memory)
+rewards.py         reward shaping, the route knowledge behind it, and the critic's side information
+teacher.py         scripted teacher that sees the level (kick-start only, never in the submission)
+distill.py         phase 1: the network copies the teacher (DAgger)
+pretrain_exit.py   supervised pre-training of the picture reader (exit pad, locked-door colour)
+train.py           phase 2: recurrent PPO from rewards, with a critic that reads ground truth
+evaluate.py        benchmark on held-out generated levels, four tiers, per-skill statistics
+metrics.py         aim, kill share, rooms seen and cleared, gun swaps, movement quality
+diag_slam.py       measures the agent's own position and map error against ground truth
+watch.py           live viewer: the game, the occupancy map the agent builds, and its statistics
+aws/               launch, run, soak-test and sync scripts for a many-core cloud box
 ```
 
-## Quick start
+## How the agent was trained
+
+1. **Copy phase** (`distill.py`, 12M steps). The network imitates the scripted teacher on generated
+   levels. The teacher's actions are executed less and less often, so the network learns on the states
+   it reaches itself. This gives basic competence: 207 and 234 on our two final test sets.
+2. **Picture reader** (`pretrain_exit.py`). The observation never says where the exit is or what
+   colour a locked door is; both are only visible in the picture. A small CNN is fitted to frames
+   labelled from ground truth. On unseen levels: 89% of its confident exit sightings are real, and
+   it names a locked door's colour correctly 79% of the time and wrongly 0% of the time.
+3. **Reward phase** (`train.py`, about 14M steps). Recurrent PPO written for this project, no RL
+   library. The policy continues from the copy phase with the teacher switched off.
+   * The critic also reads ground truth (the objective, the true walking distance to it, which way
+     the route goes). The policy never does, and the critic is not shipped.
+   * Progress is paid per cell of true walking distance gained toward the next objective (keycard,
+     then exit) and taken back when lost, so circling earns exactly nothing.
+   * The level mix shifts toward whichever level type the policy is currently failing.
+   * The newest policy is scored on 112 held-out levels every few minutes and the best one is kept.
+
+## Reward terms (`rewards.py`)
+
+| Group | Terms |
+| --- | --- |
+| Scorer-aligned | exit (largest, plus health and time left), keycard, locked door opened, door opened, new 128-unit area, kill, damage taken, early death |
+| Route | progress toward the objective by true walking distance |
+| Combat | shot that hits, shot that misses, damage dealt, new gun picked up, health picked up while hurt |
+| Movement quality | going nowhere (under 64 units net in 20 steps), reversing a turn or forward/back, re-walking a visited cell, pushing into a wall, USE with no door ahead, firing that lands nothing for 6 steps, cycling guns |
+
+The movement terms each came from a measured failure, and the comments in `rewards.py` give the
+numbers. Two lessons are recorded there: a penalty must be sized against the episode return or it
+changes nothing, and each term must be checked for the cheapest way around it (standing still was
+once cheaper than walking over old ground; walking in a tight circle slipped past four terms).
+
+## Reproduce
 
 ```bash
 uv sync
-uv pip install torch --index-url https://download.pytorch.org/whl/cu128   # training only (image has torch)
-uv run python training/train.py --workers 10 --envs-per-worker 2           # writes submission/weights/doomnet.pt
-uv run python training/train.py --resume                                   # continue from training/checkpoints/latest.pt
-uv run python training/mapgen.py --stage 3 --seed 5 --out gen.wad          # preview a generated level (ASCII)
-uv run python validate.py --map gen.wad:MAP01
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128   # training only (the image has torch)
+
+uv run python training/distill.py --workers 10 --envs-per-worker 2 --steps 12000000
+uv run python training/pretrain_exit.py --episodes 500 --out training/checkpoints/exit_eye.pt
+uv run python training/train.py --workers 10 --envs-per-worker 2 --init training/checkpoints/student.pt \
+    --load-eye training/checkpoints/exit_eye.pt --epochs 1 --lr 5e-5 --target-kl 0.02 --ent 0.003 \
+    --int-coef 0 --stage 2 --critic-warmup 150 --adaptive-mix --ckdir training/checkpoints
+
+uv run python training/evaluate.py --weights submission/weights/doomnet.pt --seeds 4 --seed-base 6161
+uv run python training/evaluate.py --teacher                    # the scripted teacher, for reference
+uv run python training/diag_slam.py --episodes 300              # position and map error
+uv run python training/watch.py --tour                          # watch it play one level of each tier
 ```
 
-**Windows note:** ViZDoom runs about 17x faster after `timeBeginPeriod(1)` (the default 15.6 ms timer
-makes every engine sync sleep). `vec_env._hires_timer()` does this in every worker.
+On a 64-core cloud box, `bash training/aws/launch.sh` runs the same pipeline (see `aws/README.md`);
+the laptop manages about 400 steps per second and the box about 1,400 to 3,700.
 
-## Architecture (submission/)
+**Windows note:** ViZDoom runs about 17 times faster after `timeBeginPeriod(1)` (with the default
+15.6 ms timer every engine sync sleeps). `vec_env._hires_timer()` does this in every worker.
 
-1. **SpatialMemory** (`spatial_memory.py`): the observation has no global coordinates, so the agent
-   keeps its own private frame.
-   * Heading comes from its own TURN actions. The keyboard turn profile was measured exactly: 5 slow
-     tics at 1.7578 deg, then 3.5156 deg per tic, with the held counter shared by both turn buttons.
-     Heading error is 0.
-   * Position comes from integrating the ego-frame velocity in `vitals`. Coefficients are a
-     least-squares fit to ground truth, and drift stays around one or two 64-unit cells over 500 steps.
-   * Each step, rays paint free space, walls, doors and locked doors into a toroidal grid at two
-     scales (64 and 256 units per cell). Keycards and pickups get projected into the grid, and visit
-     counts build up.
-   * The policy reads a heading-aligned 21x21 crop of both scales (14 channels), the per-ray
-     "already visited" fraction, and pointers to the nearest remembered locked door, door and
-     keycard. This is what makes backtracking possible: once a locked door has been seen it stays in
-     memory after it leaves the field of view.
-2. **DoomNet** (`model.py`, about 1.4M params, about 2 ms per decision on 1 CPU thread):
-   * a circular 1-D conv ring encoder over the 360 degree rays
-   * an entity set encoder (per-entity MLP plus class embedding, with 4 learned attention queries
-     over the masked set) that handles any number of enemies
-   * a CNN over the ego map
-   * an MLP over vitals and memory pointers
-   * a GRU core
-   * a factorised policy (move, strafe, turn, attack, use, weapon) plus value and auxiliary heads
+## Benchmark (`evaluate.py`)
 
-## Training
-
-* **Recurrent PPO:** truncated BPTT over 128-step rollouts, GAE with gamma 0.995 and lambda 0.95,
-  clipped objective, entropy annealing, return-scaled rewards.
-* **Curiosity:** Random Network Distillation novelty over the ray ring and vitals, plus an
-  exploration bonus for unique 128-unit areas, so the agent leaves corners and explores unseen rooms.
-* **Auxiliary self-supervision:** heads predict "enemy in crosshair" and "door ahead".
-* **Shaped reward:** mirrors the scorer's categories.
-  * exit: +12, plus bonuses for health and time left
-  * keys: +4 each
-  * unlocking a locked door: +4
-  * opening a door: +0.5
-  * new area: +0.04
-  * kill: +1
-  * pickup: +0.1
-  * damage: -0.01 per HP
-  * death: -3 to -4.5 (bigger the earlier it happens)
-  * USE spam: small penalty
-* **Curriculum:**
-  * The stage goes from 0 to 4. It moves up when the exit rate on generated maps clears a threshold,
-    or after a step budget.
-  * Each stage mixes four kinds of level: combat arenas, multi-room mazes with doors, keycard to
-    locked door to exit puzzles (1-2 locks), and gauntlets.
-  * Levels randomise size, room count, heights, light, textures, monsters and items.
-  * The 13 template fixture maps and the Freedoom 2 campaign maps are mixed in for realism.
-* **Domain randomisation:** episode tick cap drawn from 2100 to 4200, and random spawn seeds.
-
-## Teacher -> student -> RL (main pipeline)
-
-1. **Privileged teacher** (`teacher.py`, training only). It reads the true pose and the generated
-   level layout, but plans only over cells it has already *seen* through the same 64 rays the agent
-   gets. That keeps its behaviour explainable from the agent's own observations, so the student can
-   imitate it instead of copying god-view shortcuts.
-   * Priorities: fight a visible enemy (circle-strafe, back off from melee), then go to a seen
-     exit, then fetch a seen keycard for a seen locked door, then pick up health when low, then
-     explore the nearest frontier.
-   * Doors take a single USE press. A stuck detector triggers short escapes.
-   * About 50% exits on stage-2 levels, including keycard -> locked door -> exit chains.
-2. **DAgger distillation** (`distill.py`). The student (DoomNet, normal observations only) plays.
-   The teacher labels every visited state, and the executed action is the teacher's with
-   probability beta, annealed from 1 down to 0.1. The loss is cross-entropy on the 6 factorised
-   heads through the GRU, plus the auxiliary losses.
-3. **RL fine-tuning** (`train.py --init student.pt --bc-coef 0.5 --critic-warmup 30`). PPO+RND
-   starts from the student. The value head is warmed up first, and a behaviour-cloning term that
-   decays to 0 keeps it close to the teacher early on, then lets RL go beyond it.
-
-```bash
-uv run python training/teacher.py --stage 2 --episodes 12        # teacher success rate
-uv run python training/distill.py --init training/checkpoints/latest.pt
-uv run python training/train.py --init training/checkpoints/student.pt --bc-coef 0.5 --critic-warmup 30
-```
-
-The final agent is the neural network only. The teacher, the privileged state and the scripted
-logic never run at evaluation.
+Levels are generated from seeds never used in training, in the four tiers of the hidden suite, plus
+the template's test map and three Freedoom 2 campaign maps. The score mirrors the scoring categories
+the organisers describe (exit largest, then progression, exploration, combat) with tier weights 1,
+1.5, 2 and 3; the real weights are hidden, so the number is our estimate, useful for comparing
+versions and nothing more. One run of 112 levels still moves by about 20 points between level sets,
+so every promotion to `main` was decided on at least two fresh sets.

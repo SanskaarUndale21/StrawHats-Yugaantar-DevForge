@@ -1,10 +1,11 @@
-"""DoomNet: spatial-memory recurrent actor-critic (bespoke, ~1.3M params, CPU-friendly).
+"""DoomNet: spatial-memory recurrent actor-critic (bespoke, 1.57M parameters, about 5 ms per decision on one CPU thread).
 
 Inputs (built by spatial_memory.SpatialMemory):
   rays     (9, 64)        per-ray distance, proximity, hit-type one-hot, already-visited fraction
-  map      (16, 21, 21)   ego-centric, heading-aligned crops of the remembered map at 2 scales
+  map      (18, 21, 21)   heading-aligned crops of the agent's own occupancy map at 2 scales (9 layers each)
   rgb      (3, 30, 40)    low-res colour thumbnail (uint8)
-  vec      (49,)          vitals, previous action, pointers to remembered locked door/door/keycard
+  rgb2     (3, 60, 80)    sharper colour picture for the exit and door-colour reader (uint8)
+  vec      (77,)          vitals, previous action, pointers to remembered doors, locked doors by colour, keycards, exit
   ent      (32, 5) + ent_type (32,) + ent_mask (32,)   variable-size set of visible entities
 
 Modules:
@@ -13,10 +14,16 @@ Modules:
   EntitySetPool  per-entity MLP with class embeddings, then K learned queries attend over the masked
                  set (threats, pickups, keys ...): handles any number of enemies, order invariant.
   MapEncoder     small CNN over the two-scale ego map (spatial memory read-out).
+  PixelEncoder   small CNN over the thumbnail.
+  ExitEye        CNN over the sharper picture with two side heads: exit pad in view (with bearing and
+                 range) and the colour of the locked door ahead / keycard in view. The observation gives
+                 neither; confident sightings are written into the map by the agent.
   GRU core       recurrent memory for the short-term tactical state.
   Heads          factorised categorical policy: move (fwd/none/back), strafe (L/none/R),
-                 turn (L/none/R), attack, use, next-weapon; value head; auxiliary heads predict
-                 "enemy in crosshair" and "a door is ahead" from the core state (self-supervised).
+                 turn (L/none/R), attack, use, next-weapon; auxiliary heads predict "enemy in crosshair"
+                 and "a door is ahead" from the core state (self-supervised).
+  vpriv          training-only critic that also reads ground truth; not stored in the shipped weights
+                 and never called at evaluation (the plain value head is unused there as well).
 """
 
 from __future__ import annotations
