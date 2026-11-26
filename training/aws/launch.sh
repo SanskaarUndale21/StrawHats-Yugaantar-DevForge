@@ -7,6 +7,7 @@
 #   TYPE=c7i.16xlarge bash training/aws/launch.sh
 #   MARKET=on-demand PHASE=rl bash training/aws/launch.sh
 set -euo pipefail
+export MSYS_NO_PATHCONV=1   # Git Bash on Windows: keep /aws/... and /dev/sda1 as-is
 cd "$(dirname "$0")/../.."
 export AWS_PROFILE="${AWS_PROFILE:-doom}"   # dedicated profile only; never the default credentials
 if ! aws configure list-profiles 2>/dev/null | grep -qx "$AWS_PROFILE"; then
