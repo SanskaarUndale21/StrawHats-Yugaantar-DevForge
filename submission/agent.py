@@ -6,6 +6,7 @@ only turns raw observations into features (map painting, pose integration).
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ from spatial_memory import SpatialMemory  # noqa: E402
 # Sampling temperature, chosen on 112 held-out levels with the same weights: 1.0 scored 190 with 23
 # left-right turn reversals per 100 steps, 0.35 scored 218 with 11 (the scripted teacher: 9).
 TEMPERATURE = 0.35
+EXIT_CONFIDENCE = 0.6
 
 
 class DoomAgent:
@@ -56,6 +58,9 @@ class DoomAgent:
         # sample each action head from the network's own distribution, sharpened by TEMPERATURE
         choice = [torch.multinomial(torch.softmax(l / self.temperature, -1), 1, generator=self.gen).item()
                   for l in split_logits(logits)]
+        ex = self.net.exit_out[0]
+        if torch.sigmoid(ex[0]).item() > EXIT_CONFIDENCE:  # the learned detector sees an exit pad: store it
+            self.memory.note_exit(float(ex[1].clamp(-1, 1)) * math.radians(45.0), float(ex[2].clamp(0.02, 1.2)) * 1024.0)
         action = to_buttons(np.array(choice))
         self.last_action = action
         return action

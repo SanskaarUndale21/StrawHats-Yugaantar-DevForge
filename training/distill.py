@@ -122,7 +122,7 @@ def main():
                 m = (lab[:, 0] >= 0).float()
                 ce, acc = head_ce(split_logits(logits), lab, m)
                 ce = (ce * m).sum() / m.sum().clamp(min=1)
-                aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, 2))
+                aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, AUX.shape[-1])[:, :2])
                 loss = ce + 0.1 * aux_l
                 opt.zero_grad()
                 loss.backward()

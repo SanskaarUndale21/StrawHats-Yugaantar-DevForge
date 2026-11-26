@@ -40,16 +40,17 @@ CROP = 21
 HALF = CROP // 2
 
 # map channels
-C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM, C_FRONT = range(8)
-N_MAP_CH = 8
+C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM, C_FRONT, C_EXIT = range(9)
+N_MAP_CH = 9
 RGB_H, RGB_W = 30, 40  # low-res colour view (exit pads and keycards are only recognisable by colour)
+RGB2_H, RGB2_W = 60, 80  # sharper view for the exit detector (a pad is only a few pixels at range)
 
 RAY_WALL, RAY_DOOR, RAY_LOCK, RAY_ENEMY, RAY_ITEM = 1, 2, 3, 4, 5
 ENT_KEY = 9
 ENT_ITEMS = (5, 6, 7, 8)  # health, armor, ammo, weapon
 
 RAY_CH = 9
-VEC_DIM = 49
+VEC_DIM = 53
 AMMO_SCALE = np.array([200.0, 50.0, 50.0, 300.0], np.float32)
 
 _RAY_ANG = np.arange(NUM_RAYS) * (2 * math.pi / NUM_RAYS)
@@ -84,6 +85,7 @@ class SpatialMemory:
         self.locks: dict[tuple[int, int], tuple[float, float]] = {}
         self.doors: dict[tuple[int, int], tuple[float, float]] = {}
         self.keys: dict[tuple[int, int], tuple[float, float]] = {}
+        self.exits: dict[tuple[int, int], tuple[float, float]] = {}
 
     # ------------------------------------------------------------------ odometry
     def _integrate(self, action: np.ndarray, vel_fr: np.ndarray) -> None:
@@ -195,6 +197,15 @@ class SpatialMemory:
         for store, pts in ((self.doors, door), (self.locks, lock), (self.keys, key)):
             for px, py in pts:
                 store[self._cell(px, py)] = (float(px), float(py))
+
+    def note_exit(self, bearing: float, dist: float) -> None:
+        """Remember an exit pad seen at `bearing` (radians, left positive) and `dist` (map units)
+        from the current pose. The sighting comes from the network's own exit detector (in training
+        from the ground truth it is supervised with); the memory only stores where it was."""
+        px = self.x + dist * math.cos(self.th + bearing)
+        py = self.y + dist * math.sin(self.th + bearing)
+        self._paint(C_EXIT, np.array([px]), np.array([py]))
+        self.exits[self._cell(px, py)] = (px, py)
 
     # ------------------------------------------------------------------ main entry
     def update(self, obs: dict, action: np.ndarray | None) -> dict:
@@ -314,6 +325,13 @@ class SpatialMemory:
             arr = arr[: fh * RGB_H, : fw * RGB_W]
             small = arr.reshape(RGB_H, fh, RGB_W, fw, 3).mean((1, 3))
             feats_out["rgb"] = small.transpose(2, 0, 1).astype(np.uint8)
+        if rgb is None:
+            feats_out["rgb2"] = np.zeros((3, RGB2_H, RGB2_W), np.uint8)
+        else:
+            arr = np.asarray(rgb, np.float32)
+            fh, fw = max(arr.shape[0] // RGB2_H, 1), max(arr.shape[1] // RGB2_W, 1)
+            arr = arr[: fh * RGB2_H, : fw * RGB2_W]
+            feats_out["rgb2"] = arr.reshape(RGB2_H, fh, RGB2_W, fw, 3).mean((1, 3)).transpose(2, 0, 1).astype(np.uint8)
         if action is not None:
             self.prev_action = np.asarray(action, np.float32)
         return feats_out
@@ -360,7 +378,7 @@ class SpatialMemory:
         coarse = self._crop(self.coarse, COARSE, G_COARSE)
         fine[C_VISIT] = np.minimum(np.log1p(fine[C_VISIT]) / 3.0, 1.0)
         coarse[C_VISIT] = np.minimum(np.log1p(coarse[C_VISIT]) / 4.0, 1.0)
-        img = np.concatenate([fine, coarse], 0).astype(np.float32)
+        img = np.concatenate([fine[:8], coarse[:8], fine[8:], coarse[8:]], 0).astype(np.float32)
 
         weapon = np.zeros(8, np.float32)
         weapon[int(np.clip(vit[2], 0, 7))] = 1.0
@@ -374,6 +392,7 @@ class SpatialMemory:
             self._pointer(self.locks), self._pointer(self.doors), self._pointer(self.keys),
             [min(self.step / 1050.0, 1.0), min(self.since_new / 100.0, 1.0), min(self.n_cells / 300.0, 1.0),
              float(any(vit[8:14] > 0))],
+            self._pointer(self.exits),
         ]).astype(np.float32)
         assert vec.shape[0] == VEC_DIM, vec.shape
 

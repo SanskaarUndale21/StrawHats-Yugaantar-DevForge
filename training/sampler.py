@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
-FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb")
+FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb", "rgb2", "priv")
 GAMMA = 0.995
 
 
@@ -51,7 +51,7 @@ def _actor(wid, k, T, ctl, seed, out_q, shared):
     for s in slots:
         obs, f = s.reset()
         feats.append(_pack(f))
-        aux.append(aux_targets(obs))
+        aux.append(np.concatenate([aux_targets(obs), s.exit_t]))
     h = net.init_state(k)
     starts = np.ones(k, np.float32)
     retacc = np.zeros(k)

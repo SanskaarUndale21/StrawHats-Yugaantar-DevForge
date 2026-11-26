@@ -25,7 +25,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 16, 21, 49, 32, 12
+RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 53, 32, 12
+PRIV_DIM = 12  # training-only ground truth for the critic (never part of the policy's input)
 HEADS = (3, 3, 3, 2, 2, 2)  # move, strafe, turn, attack, use, weapon
 HIDDEN = 256
 
@@ -100,6 +101,25 @@ class PixelEncoder(nn.Module):
         return F.relu(self.fc(x.flatten(1)))
 
 
+class ExitEye(nn.Module):
+    """CNN over a 60x80 colour picture. Trained with a side task (is an exit pad in view, at what
+    bearing and range) so that the largest reward in the game does not depend on a 40x30 thumbnail."""
+
+    def __init__(self, out=64):
+        super().__init__()
+        self.c0 = nn.Conv2d(3, 16, 5, stride=2, padding=2)   # 30x40
+        self.c1 = nn.Conv2d(16, 32, 3, stride=2, padding=1)  # 15x20
+        self.c2 = nn.Conv2d(32, 32, 3, stride=2, padding=1)  # 8x10
+        self.c3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)  # 4x5
+        self.fc = nn.Linear(32 * 4 * 5, out)
+
+    def forward(self, x):
+        x = x.float() / 255.0 - 0.5
+        for c in (self.c0, self.c1, self.c2, self.c3):
+            x = F.relu(c(x))
+        return F.relu(self.fc(x.flatten(1)))
+
+
 class DoomNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -108,11 +128,16 @@ class DoomNet(nn.Module):
         self.map = MapEncoder(192)
         self.vec = nn.Sequential(nn.Linear(VEC_DIM, 128), nn.ReLU())
         self.pix = PixelEncoder(64)
-        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128 + 64, HIDDEN), nn.ReLU())
+        self.eye = ExitEye(64)
+        self.exit_head = nn.Linear(64, 3)  # [exit pad in view (logit), bearing / 45 deg, range / 1024]
+        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128 + 64 + 64, HIDDEN), nn.ReLU())
         self.gru = nn.GRU(HIDDEN, HIDDEN)
         self.pi = nn.Linear(HIDDEN + HIDDEN, sum(HEADS))
         self.v = nn.Linear(HIDDEN + HIDDEN, 1)
         self.aux = nn.Linear(HIDDEN, 2)  # [enemy near crosshair, door/locked door ahead]
+        # asymmetric critic: during training the value estimate also reads ground truth (distance to
+        # the objective, where the route goes). The policy never does, and the scorer never calls it.
+        self.vpriv = nn.Sequential(nn.Linear(HIDDEN + HIDDEN + PRIV_DIM, 256), nn.ReLU(), nn.Linear(256, 1))
         nn.init.orthogonal_(self.pi.weight, 0.01)
         nn.init.zeros_(self.pi.bias)
         nn.init.orthogonal_(self.v.weight, 1.0)
@@ -121,7 +146,9 @@ class DoomNet(nn.Module):
         e = torch.cat([self.rays(o["rays"]), self.ents(o["ent"], o["ent_type"], o["ent_mask"]),
                        self.map(o["map"].float() if o["map"].dtype != torch.uint8 else o["map"].float() / 255.0),
                        self.vec(o["vec"]), self.pix(o["rgb"])], -1)
-        return self.fuse(e)
+        eye = self.eye(o["rgb2"])
+        self.exit_out = self.exit_head(eye)  # read by the agent (to remember the exit) and by the side loss
+        return self.fuse(torch.cat([e, eye], -1))
 
     def forward(self, o, h, done=None):
         """o: dict of (T*B, ...) tensors; h: (1, B, H); done: (T, B) episode-start mask. Returns
@@ -144,7 +171,11 @@ class DoomNet(nn.Module):
                 outs.append(y)
             core = torch.cat(outs, 0).reshape(T * B, -1)
         z = torch.cat([core, x.view(T * B, -1)], -1)
-        return self.pi(z), self.v(z).squeeze(-1), h, core
+        if "priv" in o:
+            v = self.vpriv(torch.cat([z, o["priv"].float()], -1)).squeeze(-1)
+        else:
+            v = self.v(z).squeeze(-1)
+        return self.pi(z), v, h, core
 
     def init_state(self, b=1, device="cpu"):
         return torch.zeros(1, b, HIDDEN, device=device)
@@ -177,6 +208,12 @@ def load_compatible(net: nn.Module, state: dict) -> list:
     warm-start a newer network). Returns the names that were skipped."""
     own = net.state_dict()
     ok = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    for k, v in state.items():  # a layer that only gained inputs: keep the old ones, start the new at zero
+        if k in own and k not in ok and v.dim() == own[k].dim() >= 2 and v.shape[0] == own[k].shape[0] \
+                and v.shape[2:] == own[k].shape[2:] and v.shape[1] < own[k].shape[1]:
+            w = torch.zeros_like(own[k])
+            w[:, : v.shape[1]] = v
+            ok[k] = w
     own.update(ok)
     net.load_state_dict(own)
     return [k for k in own if k not in ok]

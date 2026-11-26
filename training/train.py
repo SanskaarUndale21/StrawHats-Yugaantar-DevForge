@@ -38,7 +38,7 @@ from model import DoomNet, load_compatible, split_logits  # noqa: E402
 from sampler import AsyncSampler  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
 
-RND_DIM = 9 * 64 + 49
+RND_DIM = 9 * 64 + 53
 
 
 class RND(nn.Module):
@@ -89,6 +89,7 @@ def main():
     ap.add_argument("--critic-warmup", type=int, default=0, help="updates with the policy frozen (value head only)")
     ap.add_argument("--target-kl", type=float, default=0.03,
                     help="stop updating on a batch once the policy moved this far from the one that played it")
+    ap.add_argument("--exit-coef", type=float, default=0.5, help="weight of the exit detector's side loss")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
@@ -187,6 +188,9 @@ def main():
         AUX = torch.as_tensor(R["aux"], device=dev)
         LAB = torch.as_tensor(R["label"], device=dev)
         bc_w = a.bc_coef * max(0.0, 1.0 - (step - step0) / max(a.bc_decay, 1))
+        if a.bc_coef > 0 and bc_w == 0.0 and smp.mode.value != 0:
+            smp.mode.value = 0  # the kick-start is over: stop running the teacher in the actors
+            print("==> teacher switched off: rewards only from here", flush=True)
         pg_on = 0.0 if update - warm0 < a.critic_warmup else 1.0
         frac = min(step / a.steps, 1.0)
         mb = max(1, N // a.minibatches)
@@ -207,9 +211,17 @@ def main():
                 ratio = torch.exp(logp - LP[:, idx].reshape(-1))
                 pg = -torch.min(ratio * adv_b, ratio.clamp(1 - a.clip, 1 + a.clip) * adv_b).mean()
                 vl = 0.5 * (v - RET[:, idx].reshape(-1)).pow(2).mean()
-                aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, 2))
+                aux_b = AUX[:, idx].reshape(-1, AUX.shape[-1])
+                aux_l = F.binary_cross_entropy_with_logits(net.aux(core), aux_b[:, :2])
+                # exit detector: is a pad in view, and where (bearing and range only count when it is)
+                ex, seen = net.exit_out, aux_b[:, 2]
+                exit_l = F.binary_cross_entropy_with_logits(ex[:, 0], seen) + \
+                    (seen * ((ex[:, 1] - aux_b[:, 3]) ** 2 + (ex[:, 2] - aux_b[:, 4]) ** 2)).sum() / seen.sum().clamp(min=1.0)
+                with torch.no_grad():
+                    hit = ((ex[:, 0] > 0) == (seen > 0.5)).float().mean().item()
+                    recall = (((ex[:, 0] > 0) & (seen > 0.5)).float().sum() / seen.sum().clamp(min=1.0)).item()
                 rnd_l = rnd(x[:, idx].reshape(-1, RND_DIM)).mean()
-                loss = pg_on * (pg - a.ent * (1 - 0.5 * frac) * ent.mean()) + 0.5 * vl + a.aux_coef * aux_l + rnd_l
+                loss = pg_on * (pg - a.ent * (1 - 0.5 * frac) * ent.mean()) + 0.5 * vl + a.aux_coef * aux_l + rnd_l + a.exit_coef * exit_l
                 if bc_w > 0:
                     lab = LAB[:, idx].reshape(T * n, -1)
                     m = (lab[:, 0] >= 0).float()
@@ -231,6 +243,9 @@ def main():
                 stats["vl"].append(vl.item())
                 stats["ent"].append(ent.mean().item())
                 stats["aux"].append(aux_l.item())
+                stats["exit_loss"].append(exit_l.item())
+                stats["exit_acc"].append(hit)
+                stats["exit_recall"].append(recall)
                 stats["kl"].append((LP[:, idx].reshape(-1) - logp).mean().item())
                 stats["clipfrac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
         smp.set_weights(net.state_dict())
@@ -255,6 +270,7 @@ def main():
                        death=np.mean([e["death"] for e in E]), kills=np.mean([e["kills"] for e in E]),
                        cells=np.mean([e["cells"] for e in E]), keys=np.mean([e["keys"] for e in E]),
                        doors=np.mean([e["doors"] for e in E]), unlocks=np.mean([e["unlocks"] for e in E]),
+                       progress=np.mean([e.get("progress", 0.0) for e in E]),
                        lag=R["lag"], t_wait=t_wait, t_upd=t_upd, **{k: float(np.mean(v)) for k, v in stats.items()})
             if update % 10 == 0:
                 print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()), flush=True)

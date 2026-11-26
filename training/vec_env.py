@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
-FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb")
+FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb", "rgb2", "priv")
 
 
 def _hires_timer():
@@ -218,7 +218,7 @@ class _Slot:
         obs, _ = self.cur.reset(seed=self.rng.randrange(1 << 30))
         self.mem = SpatialMemory()
         self.shaper = RewardShaper()
-        self.shaper.reset(priv(self.cur))
+        self.shaper.reset(priv(self.cur), self.layout)
         self.ret = 0.0
         self.len = 0
         self.obs = obs
@@ -231,7 +231,19 @@ class _Slot:
             # already drawn in memory; it fades out so the later part is all unknown maps
             if int(self.mode_val.value) == 2 and self.rng.random() < (float(self.beta_val.value) - 0.3) / 0.5:
                 reveal_layout(self.mem, self.layout, priv(self.cur))
-        return obs, self.mem.update(obs, None)
+        return obs, self._features(obs, None)
+
+    def _features(self, obs, buttons):
+        """Policy features plus the training-only extras (critic side information). When the exit pad
+        is truly in view it is written to the agent's memory here, exactly as its own detector does
+        at evaluation; a little noise and some misses keep the policy from trusting it blindly."""
+        feats = self.mem.update(obs, buttons)
+        feats["priv"] = self.shaper.priv_features()
+        self.exit_t = self.shaper.exit_targets(obs)
+        if self.exit_t[0] > 0 and self.rng.random() > 0.15:
+            self.mem.note_exit(self.exit_t[1] * 0.7853981 + self.rng.gauss(0, 0.03),
+                               self.exit_t[2] * 1024.0 * (1.0 + self.rng.gauss(0, 0.05)))
+        return feats
 
     def step(self, choice):
         """choice: the learner's head choices (6,). In distill mode the teacher's action is executed
@@ -258,9 +270,9 @@ class _Slot:
             ep = dict(self.shaper.stats, ret=self.ret, len=self.len, tags=self.tags, stage=int(self.stage_val.value))
             obs, feats = self.reset()
         else:
-            feats = self.mem.update(obs, buttons)
+            feats = self._features(obs, buttons)
         self.obs = obs
-        return feats, r, done, ep, aux_targets(obs), label
+        return feats, r, done, ep, np.concatenate([aux_targets(obs), self.exit_t]), label
 
     def close(self):
         for e in (self.env, self.fd_env):
