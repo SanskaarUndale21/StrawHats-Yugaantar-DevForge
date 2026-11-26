@@ -122,6 +122,7 @@ class AsyncSampler:
         self.q = ctx.Queue(maxsize=max(4, workers))
         self.conns, self.procs = [], []
         self.version = 0
+        self._latest, self._sender, self._closing = None, None, False
         for w in range(workers):
             a, b = ctx.Pipe()
             p = ctx.Process(target=_actor, daemon=True,
@@ -131,13 +132,33 @@ class AsyncSampler:
             self.procs.append(p)
 
     def set_weights(self, state_dict) -> None:
+        """Publish new weights. A background thread delivers them, so the learner never blocks on an
+        actor that is itself waiting to hand over a rollout (that would deadlock)."""
         self.version += 1
-        sd = {n: v.detach().cpu().numpy() for n, v in state_dict.items()}
-        for c in self.conns:
-            try:
-                c.send((self.version, sd))
-            except (BrokenPipeError, OSError):
-                pass
+        self._latest = (self.version, {n: v.detach().cpu().numpy() for n, v in state_dict.items()})
+        if self._sender is None:
+            import threading
+
+            self._sent = [0] * len(self.conns)
+            self._sender = threading.Thread(target=self._send_loop, daemon=True)
+            self._sender.start()
+
+    def _send_loop(self):
+        while not self._closing:
+            ver, sd = self._latest
+            busy = False
+            for i, c in enumerate(self.conns):
+                if self._sent[i] < ver:
+                    try:
+                        c.send((ver, sd))
+                    except (BrokenPipeError, OSError):
+                        pass
+                    self._sent[i] = ver
+                    busy = True
+                    if self._latest[0] != ver:
+                        break  # newer weights arrived: restart with those
+            if not busy:
+                time.sleep(0.02)
 
     def get(self, n: int) -> dict:
         """Block until n actor rollouts are available and merge them into one batch (T, n*k, ...)."""
@@ -164,6 +185,8 @@ class AsyncSampler:
         self.beta.value = float(b)
 
     def close(self):
+        self._closing = True
+        time.sleep(0.2)
         for c in self.conns:
             try:
                 c.send("close")
