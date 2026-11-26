@@ -122,7 +122,7 @@ class RewardShaper:
     # result went from 300 to 237, gauntlet exits from 44% to 19%, aim from 71% to 66% and gun swaps
     # from 1.4 to 10.3 a game. So the base values are back, and the newer terms stay only at a size
     # that cannot dominate them.
-    W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
+    W = dict(explore=0.08, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
              exit=12.0, exit_health=3.0, exit_time=6.0, death=4.5, step=0.002, use_spam=0.003,
              heal=0.01,
              # Standing and turning on the spot (step log of the promoted policy, 36 games): 70% of its
@@ -132,11 +132,17 @@ class RewardShaper:
              # standing cost 0.002 a step, so in explored space not moving was the cheapest thing to do,
              # and reversing a turn cost almost nothing. Now standing costs more than walking old ground,
              # and a reversal costs as much as it did in the one run where reversals fell (28 -> 17).
-             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.002,
+             # Exit memory, measured on 72 games: every time the pad came into view it was stored (20
+             # units off, typically) and the exit was then reached in 100% of those games; in the games
+             # where it never came into view the exit was reached in 4%. So the losses are levels where
+             # the exit is never found, and 43% of all cell-to-cell moves were onto ground already
+             # walked. New ground pays double and old ground costs three times more, kept just under
+             # the cost of standing still (about 5 steps per cell).
+             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.006,
              # blocked must cost more than idle: at 0.002 against 0.006, walking into a wall was the cheap
              # way out of the standing penalty (blocked steps went from 4% to 8% and it was seen spending a
              # whole game pressed against a wall)
-             turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.006, blocked=0.012, use_waste=0.01,
+             turn_flip=0.02, move_flip=0.02, idle=0.008, idle_busy=0.008, blocked=0.014, use_waste=0.01,
              swap=0.01,  # per press of "next weapon": nothing else discouraged cycling guns for no reason
              # Freezes (60 key/gauntlet games, 4-5 with a motionless stretch of 100-665 steps): in every one
              # the policy stood still holding FIRE on 98-100% of the steps and pressed nothing else, at a
