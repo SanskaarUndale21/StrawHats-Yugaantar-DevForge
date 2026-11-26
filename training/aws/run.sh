@@ -44,7 +44,7 @@ rl() {
   # still labelling the states the policy itself reaches (also after a resume), and a
   # faster march through the curriculum stages (each is forced after 6M steps at the latest)
   uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED \
-    --lr 5e-5 --target-kl 0.02 --ent 0.003 --stage 2 --stage-steps 6000000 --ckdir $CK --bc-coef 0.5 --bc-decay 20000000 $extra 2>&1 | tee -a $CK/train.out
+    --epochs 1 --lr 5e-5 --target-kl 0.02 --ent 0.003 --stage 2 --stage-steps 6000000 --ckdir $CK --bc-coef 0.5 --bc-decay 20000000 $extra 2>&1 | tee -a $CK/train.out
 }
 
 case "$PHASE" in
