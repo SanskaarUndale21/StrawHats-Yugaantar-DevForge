@@ -133,7 +133,10 @@ class RewardShaper:
              # and reversing a turn cost almost nothing. Now standing costs more than walking old ground,
              # and a reversal costs as much as it did in the one run where reversals fell (28 -> 17).
              hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.002,
-             turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.006, blocked=0.002, use_waste=0.01,
+             # blocked must cost more than idle: at 0.002 against 0.006, walking into a wall was the cheap
+             # way out of the standing penalty (blocked steps went from 4% to 8% and it was seen spending a
+             # whole game pressed against a wall)
+             turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.006, blocked=0.012, use_waste=0.01,
              swap=0.01,  # per press of "next weapon": nothing else discouraged cycling guns for no reason
              progress=0.06)
 
