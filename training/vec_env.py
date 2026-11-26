@@ -115,7 +115,8 @@ class _Slot:
 
     def __init__(self, wid, idx, ctl, seed):
         self.idx = idx
-        self.stage_val, self.beta_val, self.mode_val = ctl
+        self.stage_val, self.beta_val, self.mode_val = ctl[:3]
+        self.kindw = ctl[3] if len(ctl) > 3 else None  # shared: share of each level type to generate
         self.rng = random.Random(seed)
         self.env = None
         self.fd_env = None  # Freedoom 2 campaign env (IWAD maps), created lazily
@@ -138,7 +139,8 @@ class _Slot:
 
         lumps, tags, layouts = [], {}, {}
         for i in range(GEN_PER_WAD):
-            spec = spec_for_stage(stage, self.rng)
+            w = list(self.kindw) if self.kindw is not None else None
+            spec = spec_for_stage(stage, self.rng, w if w and sum(w) > 0 else None)
             L = None
             while L is None:
                 sd = self.rng.randrange(1 << 30)

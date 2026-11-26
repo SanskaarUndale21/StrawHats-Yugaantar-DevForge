@@ -60,7 +60,7 @@ def gen(seed):
             break
         sh._ps = priv(env)
         y = sh.exit_targets(obs)
-        if y[0] > 0 or rng.random() < 0.2:
+        if y[0] > 0 or rng.random() < 0.45:
             rgb = np.asarray(obs["rgb"], np.float32)
             X.append(rgb.reshape(60, 2, 80, 2, 3).mean((1, 3)).transpose(2, 0, 1).astype(np.uint8))
             Y.append(y)
@@ -97,12 +97,12 @@ def main():
     Xt_t, Yt_t = torch.as_tensor(Xt), torch.as_tensor(Yt)
     pw = torch.tensor(float((1 - Yt[:, 0].mean()) / max(Yt[:, 0].mean(), 1e-3)), device=dev).clamp(max=20.0)
 
-    def evaluate():
+    def evaluate(thr=0.6):
         eye.eval()
         with torch.no_grad():
             out = torch.cat([head(eye(torch.as_tensor(Xv[i:i + 1024]).to(dev))).cpu() for i in range(0, len(Xv), 1024)])
         eye.train()
-        p = torch.sigmoid(out[:, 0]).numpy() > 0.6
+        p = torch.sigmoid(out[:, 0]).numpy() > thr
         y = Yv[:, 0] > 0.5
         tp = (p & y).sum()
         rec, prec = tp / max(y.sum(), 1), tp / max(p.sum(), 1)
@@ -129,6 +129,9 @@ def main():
             rec, prec, bear, rng_ = evaluate()
             print(f"epoch {ep + 1}: on unseen levels  recall {rec:.0%}  precision {prec:.0%}  bearing error {bear:.1f} deg  "
                   f"range error {rng_:.0f} units", flush=True)
+    for thr in (0.6, 0.8, 0.9, 0.95):  # a remembered phantom exit misleads the agent: precision matters most
+        rec, prec, bear, rng_ = evaluate(thr)
+        print(f"confidence > {thr}: recall {rec:.0%}  precision {prec:.0%}  bearing error {bear:.1f} deg  range error {rng_:.0f} units")
     torch.save({"eye": {k: v.cpu() for k, v in eye.state_dict().items()},
                 "exit_head": {k: v.cpu() for k, v in head.state_dict().items()}}, a.out)
     print("saved", a.out)

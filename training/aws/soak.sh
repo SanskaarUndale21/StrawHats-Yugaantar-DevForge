@@ -17,7 +17,7 @@ while true; do
   STEP=$(tail -n 1 $CK/train.out 2>/dev/null | grep -o "step=[0-9]*" || tail -n 1 $CK/distill.out | grep -o "step=[0-9]*")
   PHASE=$([ "$SRC" = "$CK/doomnet.pt" ] && echo rl || echo distill)
 
-  OUT=$(uv run python training/evaluate.py --weights /tmp/soak_policy.pt --procs "$PROCS" 2>&1)
+  OUT=$(uv run python training/evaluate.py --weights /tmp/soak_policy.pt --procs "$PROCS" --seeds 4 --seed-base 4242 2>&1)
   S=$(score "$OUT")
   BEST=$(cat $CK/best.score 2>/dev/null || echo -1e9)
   if [ -n "$S" ] && awk -v s="$S" -v b="$BEST" 'BEGIN{exit !(s>b)}'; then
@@ -27,7 +27,7 @@ while true; do
   else
     MARK="best $BEST"
   fi
-  echo "$(date -u +%H:%M) $PHASE $STEP | fixed benchmark $S ($MARK) | $(echo "$OUT" | grep '  all ' | sed 's/  all  *//')" >> $CK/soak.log
+  echo "$(date -u +%H:%M) $PHASE $STEP | 112-level test $S ($MARK) | $(echo "$OUT" | grep '  all ' | sed 's/  all  *//')" >> $CK/soak.log
   echo "$OUT" | grep -E "tier [0-9]" | sed "s/^/    /" >> $CK/soak.log
 
   SEED=$(( (RANDOM << 15) | RANDOM ))

@@ -69,11 +69,14 @@ class LevelSpec:
     tags: list[str] = field(default_factory=list)
 
 
-def spec_for_stage(stage: int, rng: random.Random) -> LevelSpec:
-    """Curriculum: stage 0 small/easy ... stage 4 full gauntlet. Draws a tier mix per stage."""
+KINDS = ("combat", "explore", "keys", "gauntlet")
+
+
+def spec_for_stage(stage: int, rng: random.Random, weights=None) -> LevelSpec:
+    """Curriculum: stage 0 small/easy ... stage 4 full gauntlet. Draws a tier mix per stage, or the
+    mix given in `weights` (the learner raises the share of the level types it is failing)."""
     s = max(0, min(stage, 4))
-    kind = rng.choices(["combat", "explore", "keys", "gauntlet"],
-                       weights=[[4, 4, 1, 0], [3, 4, 3, 1], [2, 3, 4, 2], [2, 3, 4, 3], [2, 3, 4, 4]][s])[0]
+    kind = rng.choices(list(KINDS), weights=weights or [[4, 4, 1, 0], [3, 4, 3, 1], [2, 3, 4, 2], [2, 3, 4, 3], [2, 3, 4, 4]][s])[0]
     if kind == "combat":
         size = 8 + 3 * s
         return LevelSpec(width=(size, size + 6), height=(size, size + 6), rooms=(1, 2), room_size=(5, 8 + s),

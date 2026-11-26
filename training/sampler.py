@@ -123,6 +123,7 @@ class AsyncSampler:
         self.beta = ctx.Value("d", 0.0)
         self.mode = ctx.Value("i", mode)
         self.k, self.T, self.workers = envs_per_worker, rollout, workers
+        self.kindw = ctx.RawArray("d", 4)  # all zero = the stage's default mix of level types
         self.q = ctx.Queue(maxsize=max(4, workers))
         self.procs = []
         self.version = 0
@@ -138,7 +139,7 @@ class AsyncSampler:
         self._wlock = ctx.Lock()
         for w in range(workers):
             p = ctx.Process(target=_actor, daemon=True,
-                            args=(w, envs_per_worker, rollout, (self.stage, self.beta, self.mode), seed + 7919 * w, self.q,
+                            args=(w, envs_per_worker, rollout, (self.stage, self.beta, self.mode, self.kindw), seed + 7919 * w, self.q,
                                   (self._wbuf, self._wver, self._wlock)))
             p.start()
             self.procs.append(p)
@@ -169,6 +170,10 @@ class AsyncSampler:
         B["eps"] = [e for r in rs for e in r["eps"]]
         B["lag"] = self.version - float(np.mean([r["version"] for r in rs]))
         return B
+
+    def set_kind_weights(self, w) -> None:
+        for i, v in enumerate(w):
+            self.kindw[i] = float(v)
 
     def set_stage(self, s: int):
         self.stage.value = int(s)

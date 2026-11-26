@@ -92,6 +92,7 @@ def main():
     ap.add_argument("--exit-coef", type=float, default=0.5, help="weight of the exit detector's side loss")
     ap.add_argument("--fresh-lr-mult", type=float, default=10.0, help="learning-rate multiplier for newly added modules")
     ap.add_argument("--load-eye", default=None, help="pre-trained exit detector from training/pretrain_exit.py")
+    ap.add_argument("--adaptive-mix", action="store_true", help="generate more of the level types the policy fails")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
@@ -139,6 +140,9 @@ def main():
     smp.set_weights(net.state_dict())
     T = a.rollout
     eps_hist = collections.deque(maxlen=600)
+    KINDS = ("combat", "explore", "keys", "gauntlet")
+    kind_hist = {k: collections.deque(maxlen=300) for k in KINDS}
+    kind_w = None
     stage_hist = collections.deque(maxlen=400)
     log = open(ckdir / "log.csv", "a", newline="")
     logw = csv.writer(log)
@@ -157,6 +161,14 @@ def main():
             eps_hist.append(e)
             if e["tags"] and e["tags"][0] not in ("freedoom", "fixture") and "noexit" not in e["tags"]:
                 stage_hist.append(e["exit"])
+                if e["tags"][0] in kind_hist:
+                    kind_hist[e["tags"][0]].append(e["exit"])
+        if a.adaptive_mix and update % 10 == 0 and all(len(kind_hist[k]) >= 40 for k in KINDS):
+            # more of what it fails at: a type it always finishes keeps a small share, one it never
+            # finishes gets about nine times that
+            raw = np.array([0.12 + (1.0 - float(np.mean(kind_hist[k]))) for k in KINDS])
+            kind_w = raw / raw.sum()
+            smp.set_kind_weights(kind_w)
         Bt = to_t(R["feats"], dev)  # T,N,...
         ST = torch.as_tensor(R["starts"], device=dev)
         h0 = torch.as_tensor(R["h0"], device=dev)
@@ -290,6 +302,8 @@ def main():
                        flips100=100 * np.sum([e.get("flips", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        idle=np.sum([e.get("idle", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        revisits=np.mean([e.get("revisits", 0) for e in E]),
+                       **{f"exit_{k}": float(np.mean(kind_hist[k])) if kind_hist[k] else 0.0 for k in KINDS},
+                       **{f"mix_{k}": float(kind_w[i]) if kind_w is not None else 0.0 for i, k in enumerate(KINDS)},
                        lag=R["lag"], t_wait=t_wait, t_upd=t_upd, **{k: float(np.mean(v)) for k, v in stats.items()})
             if update % 10 == 0:
                 print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()), flush=True)

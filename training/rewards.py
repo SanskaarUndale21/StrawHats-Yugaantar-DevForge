@@ -101,8 +101,11 @@ class Navigator:
 
 
 class RewardShaper:
-    W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.01, key=4.0, door=0.5, unlock=4.0,
-             exit=12.0, exit_health=3.0, exit_time=6.0, death=3.0, step=0.002, use_spam=0.003,
+    W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
+             exit=12.0, exit_health=3.0, exit_time=6.0, death=4.5, step=0.002, use_spam=0.003,
+             # survival (it died in a third to a half of gauntlets): damage and death cost more, and
+             # health picked up while hurt pays per point regained
+             heal=0.01,
              hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
              # walking properly: reversing a turn or forward/back costs, and so does standing around
              # (measured on the copied policy: 12 left-right and 6.7 forward-back reversals per 100
@@ -128,8 +131,9 @@ class RewardShaper:
         self.door_lock = dl
         self.opened = set()
         self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0, shots=0, hits=0,
-                          revisits=0, progress=0.0, flips=0, idle=0)
+                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0)
         self.last_use = 0
+        self.health = ps["health"]
         self.last_turn = self.last_move = 0
 
     @staticmethod
@@ -165,6 +169,11 @@ class RewardShaper:
             if nw > self.nweap:
                 r += W["weapon"] * (nw - self.nweap)
             self.hit, self.dealt, self.ammo, self.nweap = ps["hitcount"], ps["dmg_dealt"], ps["ammo_sum"], nw
+        gained = ps["health"] - self.health
+        if gained > 0 and self.health < 60:
+            r += W["heal"] * min(gained, 50.0)
+            st["healed"] += gained
+        self.health = ps["health"]
         turn, move = int(action[4]) - int(action[5]), int(action[0]) - int(action[1])
         if turn and self.last_turn and turn != self.last_turn:
             r -= W["turn_flip"]
