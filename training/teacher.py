@@ -85,6 +85,7 @@ class Teacher:
         self.item_t = 0
         self.owns_better = False
         self.prev_wpn = 0
+        self.wpn_tries = 0
 
     # ------------------------------------------------------------------ geometry
     def cell_of(self, x, y):
@@ -262,7 +263,23 @@ class Teacher:
         # ---- weapon: upgrade from fist/pistol when shells/bullets for something better exist
         # weapon: never sit on the fist with bullets left; try to upgrade pistol -> shotgun when we have
         # shells (SELECT_NEXT cycles owned weapons; if it wraps to the fist, the first rule cycles on)
-        if vit[2] <= 1 and vit[4:8].sum() > 0 and not self.prev_wpn:
+        have = ps.get("weapons")
+        if have is not None:
+            # pick the best gun we own that has ammo: plasma, then shotgun up close / chaingun at range,
+            # pistol last, fist only when everything is empty. SELECT_NEXT cycles through owned guns.
+            near = (not len(enemies)) or float(f[enemies, 0].min()) * 1024.0 < 450.0
+            order = (6, 3, 4, 2) if near else (6, 4, 3, 2)
+            ammo_of = {2: vit[4], 3: vit[5], 4: vit[4], 6: vit[7]}
+            want = next((w for w in order if have[w] and ammo_of[w] > 0), 1)
+            if int(vit[2]) == want:
+                self.wpn_tries = 0
+            elif self.wpn_cool <= 0 and self.wpn_tries < 8:
+                b[8] = 1
+                self.wpn_cool = 5  # a swap takes about 20 tics to finish
+                self.wpn_tries += 1
+            elif self.wpn_tries >= 8 and self.wpn_cool < -100:
+                self.wpn_tries = 0
+        elif vit[2] <= 1 and vit[4:8].sum() > 0 and not self.prev_wpn:
             b[8] = 1  # on the fist with ammo left: cycle on immediately
         elif self.wpn_cool <= 0:
             if vit[3] <= 0 and vit[4:8].sum() > 0:
@@ -280,10 +297,29 @@ class Teacher:
             i = enemies[int(np.argmin(threat))]
             dist = f[i, 0] * 1024.0
             err = math.degrees(math.atan2(f[i, 1], f[i, 2]))
-            tol = max(2.5, math.degrees(math.atan2(18.0, max(dist, 1.0))))
+            # fire only when the crosshair is on the body (its half-width seen from here), not near it
+            tol = max(1.5, math.degrees(math.atan2(15.0, max(dist, 1.0))))
             self._turn_towards(b, err, tol=tol)
-            if abs(err) < tol + 3.0:
+            on_target = abs(err) < tol
+            if on_target or dist < 110:
                 b[6] = 1
+            rd = np.asarray(obs["rays"]["distance"])
+            left_room, right_room = rd[14:19].min(), rd[46:51].min()
+            incoming = bool((mask & (et == 4) & (f[:, 0] * 1024.0 < 500.0)).any())
+            if not (incoming or dist < 170 or et[i] == MELEE):
+                # steady aim: stand still to shoot; when the error is smaller than one turn step,
+                # sidestep toward the target to line the shot up (a key turn cannot go below 7 degrees)
+                if not on_target and not (b[4] or b[5]):
+                    side, room = (2, left_room) if err > 0 else (3, right_room)
+                    if room > 0.06:
+                        b[side] = 1
+                back_clear = rd[32] > 0.1
+                if (health < 50 or len(enemies) >= 3) and back_clear and not on_target:
+                    b[1] = 1
+                elif (dist > 700 or (et[i] == HITSCAN and dist > 380)) and abs(err) < 30 and health >= 50:
+                    b[0] = 1
+                self.scan = 0
+                return self._finish(b)
             # movement: circle-strafe, keep range, retreat when hurt
             self.strafe_t -= 1
             if self.strafe_t <= 0:

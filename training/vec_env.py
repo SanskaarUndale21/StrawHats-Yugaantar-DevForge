@@ -62,6 +62,12 @@ MAPS_PER_WAD = 32
 GEN_PER_WAD = 29  # MAP01..MAP29 generated, MAP30..MAP32 hand-made fixtures
 
 
+def priv(env) -> dict:
+    from rewards import priv as _priv
+
+    return _priv(env)
+
+
 def reveal_layout(mem, L, ps) -> None:
     """Draw the generated level into the agent's memory, in its own frame (origin and heading at spawn)."""
     import math
@@ -212,7 +218,7 @@ class _Slot:
         obs, _ = self.cur.reset(seed=self.rng.randrange(1 << 30))
         self.mem = SpatialMemory()
         self.shaper = RewardShaper()
-        self.shaper.reset(self.cur.privileged_state())
+        self.shaper.reset(priv(self.cur))
         self.ret = 0.0
         self.len = 0
         self.obs = obs
@@ -224,7 +230,7 @@ class _Slot:
             # known-map curriculum: early in distillation (teacher mostly driving) the level is
             # already drawn in memory; it fades out so the later part is all unknown maps
             if int(self.mode_val.value) == 2 and self.rng.random() < (float(self.beta_val.value) - 0.3) / 0.5:
-                reveal_layout(self.mem, self.layout, self.cur.privileged_state())
+                reveal_layout(self.mem, self.layout, priv(self.cur))
         return obs, self.mem.update(obs, None)
 
     def step(self, choice):
@@ -237,12 +243,12 @@ class _Slot:
         buttons = to_buttons(np.asarray(choice)[None])[0]
         label = np.full(6, -1, np.int64)
         if self.teacher is not None:
-            tb = self.teacher.act(self.obs, self.cur.privileged_state())
+            tb = self.teacher.act(self.obs, priv(self.cur))
             label = buttons_to_choice(tb)
             if self.rng.random() < float(self.beta_val.value):
                 buttons = tb
         obs, _, term, trunc, info = self.cur.step(buttons)
-        ps = self.cur.privileged_state()
+        ps = priv(self.cur)
         r = self.shaper(ps, buttons)
         self.ret += r
         self.len += 1

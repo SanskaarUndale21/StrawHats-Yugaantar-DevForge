@@ -86,7 +86,7 @@ def _run_one(job):
     torch.set_num_threads(1)
     from doom_env import make_env
     from metrics import EpisodeMetrics
-    from rewards import RewardShaper
+    from rewards import RewardShaper, priv
 
     wad, name, L, T = _make_level(spec)
     env = make_env(wad, name, episode_ticks=T, render_buffers=True)
@@ -98,7 +98,7 @@ def _run_one(job):
         from teacher import Teacher
 
         agent = Teacher(L, seed=seed)
-        act = lambda o: agent.act(o, env.privileged_state())  # noqa: E731
+        act = lambda o: agent.act(o, priv(env))  # noqa: E731
     else:
         from agent import DoomAgent
 
@@ -111,14 +111,14 @@ def _run_one(job):
         agent.reset()
         act = agent.act
     shaper = RewardShaper()
-    shaper.reset(env.privileged_state())
+    shaper.reset(priv(env))
     met = EpisodeMetrics(env, L)
     done = False
     tic = 0
     while not done:
         a = act(obs)
         obs, _, te, tr, info = env.step(a)
-        ps = env.privileged_state()
+        ps = priv(env)
         shaper(ps, a)
         met.step(a)
         tic = ps["tic"] if not ps["finished"] else tic + 4
