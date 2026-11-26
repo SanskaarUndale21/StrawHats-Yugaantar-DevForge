@@ -135,7 +135,11 @@ class RewardShaper:
              # nothing; measured afterwards: 18% of all steps spent at a door, standing still on 70%
              # of them with 14 USE presses per 100 steps; 17 turn reversals per 100 steps while
              # walking; standing still on 46% of the steps with an enemy in view)
-             turn_flip=0.02, move_flip=0.02, idle=0.004, idle_busy=0.008, blocked=0.004, use_waste=0.03,
+             # second measurement, 1M steps into these rewards: turn reversals at doors fell from 14.6 to
+             # 3.2 per 100 steps and USE presses there halved, but it stands still on 78% of its steps
+             # at a door (24% of all steps) and on 51% of its steps in a fight, so standing still in
+             # those two situations now costs 2.5 times more
+             turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.02, blocked=0.004, use_waste=0.03,
              # paid per 64-unit cell of true walking distance gained toward the next objective (and
              # taken back when it is lost again, so walking in circles earns exactly nothing)
              progress=0.06)
