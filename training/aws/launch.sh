@@ -53,7 +53,9 @@ MKT=()
 if [ "$MARKET" = "spot" ]; then
   MKT=(--instance-market-options "MarketType=spot,SpotOptions={MaxPrice=$MAXPRICE,SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}")
 fi
-ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" --instance-initiated-shutdown-behavior terminate \
+PLACE=()
+if [ -n "${AZ:-}" ]; then PLACE=(--placement "AvailabilityZone=$AZ"); fi   # pick a zone that has spot capacity
+ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" --instance-initiated-shutdown-behavior terminate "${PLACE[@]}" \
      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${NAME:-doom-train}}]" "${MKT[@]}" \
      --query 'Instances[0].InstanceId' --output text)

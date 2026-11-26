@@ -11,8 +11,10 @@ SEED="${4:-1}"
 CORES=$(nproc)
 # measured on 64 cores: with 50 actors and 12 learner threads the learner was the bottleneck
 # (3.6 s per update against 0.1 s waiting for data), so the learner gets a bigger share
-WORKERS=$(( CORES > 32 ? CORES - 24 : (CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES)) ))
-export LEARNER_THREADS=$(( CORES > 32 ? 20 : (CORES > 16 ? 12 : 1) ))
+# rl-first: the sharper picture makes each update heavier (measured 4.4-5.1 s per update with 20
+# threads while actors waited 0.13 s), so the learner gets nearly half the machine
+WORKERS=$(( CORES > 32 ? CORES - 34 : (CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES)) ))
+export LEARNER_THREADS=$(( CORES > 32 ? 30 : (CORES > 16 ? 12 : 1) ))
 CK=training/checkpoints
 echo "cores=$CORES workers=$WORKERS phase=$PHASE"
 
