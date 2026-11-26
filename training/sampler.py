@@ -33,7 +33,7 @@ def _pack(f):
     return f
 
 
-def _actor(wid, k, T, ctl, seed, out_q, w_conn):
+def _actor(wid, k, T, ctl, seed, out_q, shared):
     time.sleep(0.25 * wid)  # stagger engine start-up
     import torch
 
@@ -56,16 +56,19 @@ def _actor(wid, k, T, ctl, seed, out_q, w_conn):
     starts = np.ones(k, np.float32)
     retacc = np.zeros(k)
     version = -1
+    wbuf, wver, wlock = shared
+    layout = [(n, tuple(v.shape), v.dtype, v.numel()) for n, v in net.state_dict().items()]
     try:
         while True:
-            msg = None
-            while w_conn.poll():
-                msg = w_conn.recv()
-            if msg is not None:
-                if msg == "close":
-                    break
-                version, sd = msg
-                net.load_state_dict({n: torch.from_numpy(v) for n, v in sd.items()})
+            if wver.value != version:  # newer weights published: copy them out of shared memory
+                with wlock:
+                    flat = np.frombuffer(wbuf, np.float32).copy()
+                    version = wver.value
+                sd, o = {}, 0
+                for n, shape, dtype, size in layout:
+                    sd[n] = torch.from_numpy(flat[o:o + size].reshape(shape)).to(dtype)
+                    o += size
+                net.load_state_dict(sd)
             buf = {key: [] for key in FEAT_KEYS}
             out = {key: [] for key in ("choice", "logp", "rew", "done", "starts", "aux", "label", "retacc")}
             eps = []
@@ -120,45 +123,33 @@ class AsyncSampler:
         self.mode = ctx.Value("i", mode)
         self.k, self.T, self.workers = envs_per_worker, rollout, workers
         self.q = ctx.Queue(maxsize=max(4, workers))
-        self.conns, self.procs = [], []
+        self.procs = []
         self.version = 0
-        self._latest, self._sender, self._closing = None, None, False
+        self._closing = False
+        # weights live in shared memory: publishing is one memcpy and every actor picks the newest
+        # version up at its next rollout. (Sending them down 50 pipes one after another left most
+        # actors a hundred versions behind: a pipe write blocks until that actor reads it.)
+        from model import DoomNet
+
+        self._n = sum(v.numel() for v in DoomNet().state_dict().values())
+        self._wbuf = ctx.RawArray("f", self._n)
+        self._wver = ctx.Value("l", 0, lock=False)
+        self._wlock = ctx.Lock()
         for w in range(workers):
-            a, b = ctx.Pipe()
             p = ctx.Process(target=_actor, daemon=True,
-                            args=(w, envs_per_worker, rollout, (self.stage, self.beta, self.mode), seed + 7919 * w, self.q, b))
+                            args=(w, envs_per_worker, rollout, (self.stage, self.beta, self.mode), seed + 7919 * w, self.q,
+                                  (self._wbuf, self._wver, self._wlock)))
             p.start()
-            self.conns.append(a)
             self.procs.append(p)
 
     def set_weights(self, state_dict) -> None:
-        """Publish new weights. A background thread delivers them, so the learner never blocks on an
-        actor that is itself waiting to hand over a rollout (that would deadlock)."""
+        """Publish new weights to all actors (never blocks on an actor)."""
+        flat = np.concatenate([v.detach().cpu().numpy().astype(np.float32).ravel() for v in state_dict.values()])
+        assert flat.size == self._n, (flat.size, self._n)
         self.version += 1
-        self._latest = (self.version, {n: v.detach().cpu().numpy() for n, v in state_dict.items()})
-        if self._sender is None:
-            import threading
-
-            self._sent = [0] * len(self.conns)
-            self._sender = threading.Thread(target=self._send_loop, daemon=True)
-            self._sender.start()
-
-    def _send_loop(self):
-        while not self._closing:
-            ver, sd = self._latest
-            busy = False
-            for i, c in enumerate(self.conns):
-                if self._sent[i] < ver:
-                    try:
-                        c.send((ver, sd))
-                    except (BrokenPipeError, OSError):
-                        pass
-                    self._sent[i] = ver
-                    busy = True
-                    if self._latest[0] != ver:
-                        break  # newer weights arrived: restart with those
-            if not busy:
-                time.sleep(0.02)
+        with self._wlock:
+            np.frombuffer(self._wbuf, np.float32)[:] = flat
+            self._wver.value = self.version
 
     def get(self, n: int) -> dict:
         """Block until n actor rollouts are available and merge them into one batch (T, n*k, ...)."""
