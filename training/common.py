@@ -78,10 +78,11 @@ def learner_device():
 
 
 # heads: 0 move, 1 strafe, 2 turn, 3 fire, 4 use, 5 weapon
-# cap of the inverse-frequency class weight per rare head. The policy *samples* its actions, so a
-# weight of w makes it press roughly w times as often as the teacher: 25 turned one gun swap per
-# game into fifty. Small caps keep the learning signal without the button spam.
-RARE_HEADS = {4: 4.0, 5: 2.0}
+# cap of the inverse-frequency class weight per rare head, both measured on the benchmark:
+#   USE needs the full 25: with a cap of 4 the student stopped unlocking doors within 0.3M steps
+#   (locked doors opened per key level fell from 0.58 to 0.08).
+#   weapon must stay low: the policy samples its actions, so 25 turned two gun swaps per game into fifty.
+RARE_HEADS = {4: 25.0, 5: 2.0}
 
 
 def head_ce(logits_list, lab, m):
