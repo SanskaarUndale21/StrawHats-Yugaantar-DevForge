@@ -215,7 +215,8 @@ def main():
                 aux_l = F.binary_cross_entropy_with_logits(net.aux(core), aux_b[:, :2])
                 # exit detector: is a pad in view, and where (bearing and range only count when it is)
                 ex, seen = net.exit_out, aux_b[:, 2]
-                exit_l = F.binary_cross_entropy_with_logits(ex[:, 0], seen) + \
+                # a pad is in view on about 1% of frames: without the weight the detector just says "never"
+                exit_l = F.binary_cross_entropy_with_logits(ex[:, 0], seen, pos_weight=torch.tensor(20.0, device=dev)) + \
                     (seen * ((ex[:, 1] - aux_b[:, 3]) ** 2 + (ex[:, 2] - aux_b[:, 4]) ** 2)).sum() / seen.sum().clamp(min=1.0)
                 with torch.no_grad():
                     hit = ((ex[:, 0] > 0) == (seen > 0.5)).float().mean().item()
