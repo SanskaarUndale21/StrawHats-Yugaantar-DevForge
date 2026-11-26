@@ -142,7 +142,7 @@ class RewardShaper:
              # blocked must cost more than idle: at 0.002 against 0.006, walking into a wall was the cheap
              # way out of the standing penalty (blocked steps went from 4% to 8% and it was seen spending a
              # whole game pressed against a wall)
-             turn_flip=0.02, move_flip=0.02, idle=0.008, idle_busy=0.008, blocked=0.014, use_waste=0.01,
+             turn_flip=0.02, move_flip=0.02, idle=0.004, idle_busy=0.004, blocked=0.008, use_waste=0.01,
              swap=0.01,  # per press of "next weapon": nothing else discouraged cycling guns for no reason
              # Freezes (60 key/gauntlet games, 4-5 with a motionless stretch of 100-665 steps): in every one
              # the policy stood still holding FIRE on 98-100% of the steps and pressed nothing else, at a
@@ -150,6 +150,11 @@ class RewardShaper:
              # uses no ammo, so nothing counted those as misses. Firing that has landed nothing for
              # 6 steps in a row now costs every step until something is hit or the trigger is released.
              futile_fire=0.02,
+             # Going nowhere, whatever the keys: under 64 units of net movement over the last 20 steps.
+             # A tight circle is not standing, not pushing a wall, has no reversal and stays inside one
+             # cell, so no other term sees it (measured: 4% of steps walking in circles, 4% standing,
+             # 2% shuffling). Half price with an enemy in view, where holding ground can be right.
+             loiter=0.008,
              progress=0.06)
 
     def reset(self, ps: dict, layout=None) -> None:
@@ -170,10 +175,11 @@ class RewardShaper:
         self.door_lock = dl
         self.opened = set()
         self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0, shots=0, hits=0,
-                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0, blocked=0, futile=0,
+                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0, blocked=0, futile=0, loiter=0,
                           use_waste=0)
         self.last_use = 0
         self.fire_run = 0
+        self.trail = collections.deque([(ps["x"], ps["y"])], maxlen=21)
         self.hit_seen = ps.get("hitcount", 0.0)
         self.since_use = 1000
         self.px, self.py = ps["x"], ps["y"]
@@ -233,6 +239,10 @@ class RewardShaper:
             if self.fire_run > 6:
                 r -= W["futile_fire"]
                 st["futile"] += 1
+        self.trail.append((ps["x"], ps["y"]))
+        if len(self.trail) == 21 and math.hypot(ps["x"] - self.trail[0][0], ps["y"] - self.trail[0][1]) < 64.0:
+            r -= W["loiter"] * (0.5 if ps.get("enemy_visible") else 1.0)
+            st["loiter"] += 1
         pressing = bool(action[0] or action[1] or action[2] or action[3])
         if not pressing:  # keep moving: more so in a fight (dodge) and at a door (go through it)
             r -= W["idle_busy"] if (ps.get("enemy_visible") or ps.get("door_ahead")) else W["idle"]
