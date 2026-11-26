@@ -43,6 +43,7 @@ HALF = CROP // 2
 C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM, C_FRONT = range(8)
 N_MAP_CH = 8
 RGB_H, RGB_W = 30, 40  # low-res colour view (exit pads and keycards are only recognisable by colour)
+PIX_CH = 4             # red, green, blue + the depth buffer (how far each pixel is: drops, steps, openings)
 
 RAY_WALL, RAY_DOOR, RAY_LOCK, RAY_ENEMY, RAY_ITEM = 1, 2, 3, 4, 5
 ENT_KEY = 9
@@ -306,14 +307,21 @@ class SpatialMemory:
         feats_out = self._features(obs, vit, dist, hit, visited_frac, feats, etype, mask)
         rgb = obs.get("rgb")
         if rgb is None:
-            feats_out["rgb"] = np.zeros((3, RGB_H, RGB_W), np.uint8)
+            feats_out["rgb"] = np.zeros((PIX_CH, RGB_H, RGB_W), np.uint8)
         else:  # area-average down to (3, RGB_H, RGB_W) uint8, from any input resolution
             arr = np.asarray(rgb, np.float32)
             H, W = arr.shape[:2]
             fh, fw = max(H // RGB_H, 1), max(W // RGB_W, 1)
             arr = arr[: fh * RGB_H, : fw * RGB_W]
-            small = arr.reshape(RGB_H, fh, RGB_W, fw, 3).mean((1, 3))
-            feats_out["rgb"] = small.transpose(2, 0, 1).astype(np.uint8)
+            small = arr.reshape(RGB_H, fh, RGB_W, fw, 3).mean((1, 3)).transpose(2, 0, 1)
+            dep = obs.get("depth")
+            if dep is None:
+                dsmall = np.zeros((1, RGB_H, RGB_W), np.float32)
+            else:  # same area-average for the depth buffer, as a fourth image channel
+                d = np.asarray(dep, np.float32)
+                dh, dw = max(d.shape[0] // RGB_H, 1), max(d.shape[1] // RGB_W, 1)
+                dsmall = d[: dh * RGB_H, : dw * RGB_W].reshape(RGB_H, dh, RGB_W, dw).mean((1, 3))[None]
+            feats_out["rgb"] = np.concatenate([small, dsmall], 0).astype(np.uint8)
         if action is not None:
             self.prev_action = np.asarray(action, np.float32)
         return feats_out

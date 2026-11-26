@@ -3,7 +3,7 @@
 Inputs (built by spatial_memory.SpatialMemory):
   rays     (9, 64)        per-ray distance, proximity, hit-type one-hot, already-visited fraction
   map      (16, 21, 21)   ego-centric, heading-aligned crops of the remembered map at 2 scales
-  rgb      (3, 30, 40)    low-res colour thumbnail (uint8)
+  rgb      (4, 30, 40)    low-res colour thumbnail + depth buffer (uint8)
   vec      (49,)          vitals, previous action, pointers to remembered locked door/door/keycard
   ent      (32, 5) + ent_type (32,) + ent_mask (32,)   variable-size set of visible entities
 
@@ -82,12 +82,13 @@ class MapEncoder(nn.Module):
 
 
 class PixelEncoder(nn.Module):
-    """Tiny CNN over a 30x40 colour thumbnail. The rays say nothing about floor textures, so this is
-    how the agent recognises the exit pad (and keycard colours) when they are in view."""
+    """Tiny CNN over a 30x40 colour + depth thumbnail. The rays say nothing about floor textures, so
+    this is how the agent recognises the exit pad (and keycard colours) when they are in view; the
+    depth channel adds the shape of what is ahead (the rays are a single horizontal slice)."""
 
     def __init__(self, out=64):
         super().__init__()
-        self.c1 = nn.Conv2d(3, 16, 5, stride=2, padding=2)   # 15x20
+        self.c1 = nn.Conv2d(4, 16, 5, stride=2, padding=2)   # 15x20
         self.c2 = nn.Conv2d(16, 32, 3, stride=2, padding=1)  # 8x10
         self.c3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)  # 4x5
         self.fc = nn.Linear(32 * 4 * 5, out)
@@ -177,6 +178,11 @@ def load_compatible(net: nn.Module, state: dict) -> list:
     warm-start a newer network). Returns the names that were skipped."""
     own = net.state_dict()
     ok = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    for k, v in state.items():  # a layer that only gained input channels: keep the old ones, zero the new
+        if k in own and k not in ok and v.dim() == own[k].dim() >= 2 and v.shape[0] == own[k].shape[0]                 and v.shape[2:] == own[k].shape[2:] and v.shape[1] < own[k].shape[1]:
+            w = torch.zeros_like(own[k])
+            w[:, : v.shape[1]] = v
+            ok[k] = w
     own.update(ok)
     net.load_state_dict(own)
     return [k for k in own if k not in ok]
