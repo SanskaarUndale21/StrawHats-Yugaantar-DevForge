@@ -116,32 +116,18 @@ class Navigator:
 
 
 class RewardShaper:
-    # The scorer pays for the exit most, but also for kills, new areas, keycards and doors, and the
-    # episode ends at the exit; its time bonus is "small". So the time bonus here is small too and new
-    # ground pays more than before: leaving with enemies alive and rooms unseen must not be the best deal.
-    W = dict(explore=0.1, kill=1.5, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
-             exit=12.0, exit_health=3.0, exit_time=1.0, death=4.5, step=0.004, use_spam=0.003,
-             # survival (it died in a third to a half of gauntlets): damage and death cost more, and
-             # health picked up while hurt pays per point regained
+    # These are the values the best policy so far was trained with (3.84M RL steps; 271-300 on three
+    # fresh sets of 112 levels). Three later rounds of stronger shaping (leave the exit for last, 3x
+    # aim, 5x movement penalties, 2x step cost) each made the same test worse: on one fresh set the
+    # result went from 300 to 237, gauntlet exits from 44% to 19%, aim from 71% to 66% and gun swaps
+    # from 1.4 to 10.3 a game. So the base values are back, and the newer terms stay only at a size
+    # that cannot dominate them.
+    W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
+             exit=12.0, exit_health=3.0, exit_time=6.0, death=4.5, step=0.002, use_spam=0.003,
              heal=0.01,
-             # aim and finishing the fight: the promoted policy hits with 74-77% of its shots and
-             # kills 43% of the monsters (the teacher: 84% and 77%), so a hit, a miss and a kill each
-             # weigh three times / 1.5 times what they did; every step costs twice as much (speed)
-             hit=0.15, miss=0.06, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
-             # walking properly: reversing a turn or forward/back costs, and so does standing around
-             # (measured on the copied policy: 12 left-right and 6.7 forward-back reversals per 100
-             # steps, idle on 26-29% of steps)
-             # (first values 0.004 / 0.004 / 0.001 were about 3% of an episode's return and changed
-             # nothing; measured afterwards: 18% of all steps spent at a door, standing still on 70%
-             # of them with 14 USE presses per 100 steps; 17 turn reversals per 100 steps while
-             # walking; standing still on 46% of the steps with an enemy in view)
-             # second measurement, 1M steps into these rewards: turn reversals at doors fell from 14.6 to
-             # 3.2 per 100 steps and USE presses there halved, but it stands still on 78% of its steps
-             # at a door (24% of all steps) and on 51% of its steps in a fight, so standing still in
-             # those two situations now costs 2.5 times more
-             turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.02, blocked=0.004, use_waste=0.03,
-             # paid per 64-unit cell of true walking distance gained toward the next objective (and
-             # taken back when it is lost again, so walking in circles earns exactly nothing)
+             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
+             turn_flip=0.006, move_flip=0.006, idle=0.002, idle_busy=0.004, blocked=0.002, use_waste=0.01,
+             swap=0.01,  # per press of "next weapon": nothing else discouraged cycling guns for no reason
              progress=0.06)
 
     def reset(self, ps: dict, layout=None) -> None:
@@ -228,6 +214,8 @@ class RewardShaper:
             r -= W["use_waste"]  # USE with no door in front, or again while the door is still moving
             st["use_waste"] += 1
         self.since_use = 0 if action[7] else self.since_use + 1
+        if action[8]:
+            r -= W["swap"]
         self._ps = ps
         if self.nav is not None and not ps["finished"]:
             cell = self.nav.cell(ps["x"], ps["y"])
@@ -292,8 +280,10 @@ class RewardShaper:
             left = (ps["episode_ticks"] - ps["tic"]) / 4.0  # decision steps left
             d = self.nav.exit_distance(cell, held)
             done = ps["kills"] - self.kills0 >= self.nav.n_monsters and len(self.cells) >= 0.85 * len(self.nav.area)
-            self._leave = bool(done or ps["health"] < 35 or ps["tic"] > 0.40 * ps["episode_ticks"]
-                               or (d is not None and left < d * 3.0 * 2.5))
+            # Waiting for the level to be "finished" before leaving cost exits on the long levels
+            # (112-level test 258 -> 203 over the 4M steps it was in force), and the exit is the
+            # largest score item. The exit is the objective as soon as it can be reached.
+            self._leave = True
         return self._leave
 
     # ------------------------------------------------------------------ training-only side information
