@@ -18,7 +18,8 @@ roughly $4.
 
 ## Before the first launch
 
-1. Install the AWS CLI and run `aws configure` with your access key and region (e.g. `us-east-1`).
+1. Create a **dedicated profile** for this project: `aws configure --profile doom`. The scripts
+   only ever use the `doom` profile (or `AWS_PROFILE`) and refuse to run with default credentials.
 2. In the console, open **Service Quotas → EC2** and ask for at least 32 vCPU in both of these:
    - *Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances*
    - *All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests*

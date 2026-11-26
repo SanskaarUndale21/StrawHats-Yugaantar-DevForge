@@ -27,8 +27,22 @@ sys.path.insert(0, str(ROOT / "training"))
 from agent import DoomAgent  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
 
-SCALE = 5
 PANEL = 300
+
+
+def _hires(width_res="RES_800X600"):
+    """Render the *viewer* at high resolution. The agent never reads pixels (rays, entities, vitals
+    only), so its behaviour is identical to evaluation; only the picture you see is sharper."""
+    import types
+
+    import vizdoom as vd
+    import doom_env.wrapper as W
+
+    res = types.SimpleNamespace(**{k: getattr(vd.ScreenResolution, k) for k in dir(vd.ScreenResolution) if k.startswith("RES_")})
+    res.RES_160X120 = getattr(vd.ScreenResolution, width_res)
+    proxy = types.SimpleNamespace(**{k: getattr(vd, k) for k in dir(vd) if not k.startswith("__")})
+    proxy.ScreenResolution = res
+    W.vd = proxy
 
 
 def memory_view(mem, size=PANEL):
@@ -66,6 +80,7 @@ def main():
     ap.add_argument("--episodes", type=int, default=2)
     ap.add_argument("--ticks", type=int, default=4200)
     ap.add_argument("--record", default=None)
+    ap.add_argument("--lowres", action="store_true", help="show the raw 160x120 evaluation frame")
     ap.add_argument("--weights", default=None, help="checkpoint to load (default: submission/weights/doomnet.pt)")
     a = ap.parse_args()
     _hires_timer()
@@ -80,7 +95,15 @@ def main():
         L = write_level(wad, spec, a.seed)
         tags = spec.tags
         print(ascii_map(L))
+    if not a.lowres:
+        _hires()
     env = make_env(wad, a.map, episode_ticks=a.ticks, render_buffers=True)
+    if not a.lowres:
+        for f, v in (("set_render_hud", True), ("set_render_crosshair", True)):
+            try:
+                getattr(env._game, f)(v)
+            except Exception:
+                pass
     agent = DoomAgent(env.observation_space, env.action_space, "cpu")
     if a.weights:
         import torch
@@ -88,10 +111,13 @@ def main():
         ck = torch.load(a.weights, map_location="cpu", weights_only=False)
         agent.net.load_state_dict(ck["model"] if "model" in ck else ck)
         print(f"loaded {a.weights} (step {ck.get('step', '?')})")
-    W, H = 160 * SCALE, 120 * SCALE
+    H0, W0 = env._game.get_screen_height(), env._game.get_screen_width()
+    scale = max(1, 800 // W0)
+    W, H = W0 * scale, H0 * scale
     writer = None
     if a.record:
         writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), 35 / 4, (W + PANEL, H))
+    print(f"render {W0}x{H0}")
     realtime, paused = True, False
     names = ["FWD", "BACK", "SL", "SR", "TL", "TR", "FIRE", "USE", "WPN"]
     for ep in range(a.episodes):
