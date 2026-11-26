@@ -25,6 +25,8 @@ from spatial_memory import SpatialMemory  # noqa: E402
 # Sampling temperature, chosen on 112 held-out levels with the same weights: 1.0 scored 190 with 23
 # left-right turn reversals per 100 steps, 0.35 scored 218 with 11 (the scripted teacher: 9).
 TEMPERATURE = 0.35
+TEMP_MOVE = 0.35  # move / strafe / turn heads
+USE_REFIRE = 0    # decision steps USE stays released after a press
 
 
 class DoomAgent:
@@ -40,7 +42,10 @@ class DoomAgent:
             ckpt = torch.load(path, map_location=self.device, weights_only=True)
             load_compatible(self.net, ckpt["model"] if "model" in ckpt else ckpt)
         self.gen = torch.Generator().manual_seed(0)
-        self.temperature = float(os.environ.get("DOOM_TEMP", TEMPERATURE))  # env override: experiments only
+        # environment overrides exist for experiments only; the scorer runs the constants above
+        self.temperature = float(os.environ.get("DOOM_TEMP", TEMPERATURE))
+        self.temp_move = float(os.environ.get("DOOM_TEMP_MOVE", os.environ.get("DOOM_TEMP", TEMP_MOVE)))
+        self.use_refire = int(os.environ.get("DOOM_USE_REFIRE", USE_REFIRE))
         self.memory = SpatialMemory()
         self.reset()
 
@@ -48,14 +53,21 @@ class DoomAgent:
         self.memory.reset()
         self.h = self.net.init_state(1, self.device)
         self.last_action = None
+        self.since_use = 10_000
 
     @torch.no_grad()
     def act(self, observation: dict) -> np.ndarray:
         feats = self.memory.update(observation, self.last_action)
         logits, _, self.h, _ = self.net(obs_to_torch(feats, self.device), self.h)
-        # sample each action head from the network's own distribution, sharpened by TEMPERATURE
-        choice = [torch.multinomial(torch.softmax(l / self.temperature, -1), 1, generator=self.gen).item()
-                  for l in split_logits(logits)]
+        heads = list(split_logits(logits))
+        if self.since_use < self.use_refire:
+            # USE was pressed a moment ago: pressing it again while the door is still moving sends it
+            # shut. Hold the button off until the door has had time to open.
+            heads[4] = heads[4] + torch.tensor([0.0, -1e9])
+        # sample each action head from the network's own distribution, sharpened by its temperature
+        temps = (self.temp_move, self.temp_move, self.temp_move, self.temperature, self.temperature, self.temperature)
+        choice = [torch.multinomial(torch.softmax(l / t, -1), 1, generator=self.gen).item() for l, t in zip(heads, temps)]
+        self.since_use = 0 if choice[4] == 1 else self.since_use + 1
         action = to_buttons(np.array(choice))
         self.last_action = action
         return action
