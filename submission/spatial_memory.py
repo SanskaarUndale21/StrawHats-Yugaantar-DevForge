@@ -43,6 +43,10 @@ HALF = CROP // 2
 C_VISIT, C_FREE, C_WALL, C_DOOR, C_LOCK, C_KEY, C_ITEM, C_FRONT, C_EXIT = range(9)
 N_MAP_CH = 9
 RGB_H, RGB_W = 30, 40  # low-res colour view (exit pads and keycards are only recognisable by colour)
+# scene memory: one token per place the agent has stood (places at least MEM_SPACING apart), holding
+# what the sensors showed there. The network attends over the bank; no grid map is given to it.
+MEM_N, MEM_C, MEM_SPACING = 96, 15, 160.0
+MEM_F = 7 + MEM_C  # where the place is relative to the agent now (7) + what was sensed there (MEM_C)
 RGB2_H, RGB2_W = 60, 80  # sharper view for the exit detector (a pad is only a few pixels at range)
 
 RAY_WALL, RAY_DOOR, RAY_LOCK, RAY_ENEMY, RAY_ITEM = 1, 2, 3, 4, 5
@@ -86,6 +90,9 @@ class SpatialMemory:
         self.doors: dict[tuple[int, int], tuple[float, float]] = {}
         self.keys: dict[tuple[int, int], tuple[float, float]] = {}
         self.exits: dict[tuple[int, int], tuple[float, float]] = {}
+        self.bank_pose = np.zeros((MEM_N, 3), np.float64)   # x, y, heading when last refreshed
+        self.bank_step = np.full(MEM_N, -1, np.int64)       # step of last refresh, -1 = empty slot
+        self.bank_feat = np.zeros((MEM_N, MEM_C), np.float32)
 
     # ------------------------------------------------------------------ odometry
     def _integrate(self, action: np.ndarray, vel_fr: np.ndarray) -> None:
@@ -198,6 +205,50 @@ class SpatialMemory:
             for px, py in pts:
                 store[self._cell(px, py)] = (float(px), float(py))
 
+    def _remember_place(self, dist, hit, etype, mask) -> None:
+        """Write what is sensed here into the token for this place (a new one if the agent has not
+        stood within half a spacing of any stored place; the stalest slot is reused when full)."""
+        used = self.bank_step >= 0
+        d = np.hypot(self.bank_pose[:, 0] - self.x, self.bank_pose[:, 1] - self.y)
+        d[~used] = np.inf
+        i = int(np.argmin(d))
+        if not used.any() or d[i] > MEM_SPACING / 2:
+            free = np.flatnonzero(~used)
+            i = int(free[0]) if len(free) else int(np.argmin(self.bank_step))
+            self.bank_feat[i] = 0.0
+        c = self.bank_feat[i]
+        visits = c[14]
+        c[0:8] = dist.reshape(8, 8).min(1)                       # nearest obstacle in each of 8 directions
+        near = dist < 0.5
+        c[8] = float((near & (hit == RAY_DOOR)).any())           # an ordinary door close by
+        c[9] = float((near & (hit == RAY_LOCK)).any())           # a locked door close by
+        t = etype[mask]
+        c[10] = float((t == ENT_KEY).any())                      # a keycard in sight
+        c[11] = min(float(((t >= 1) & (t <= 3)).sum()) / 4.0, 1.0)  # enemies in sight
+        c[12] = float(np.isin(t, ENT_ITEMS).any())               # pickups in sight
+        c[14] = min(visits + 0.02, 1.0)                          # how long it has stood here in total
+        self.bank_pose[i] = (self.x, self.y, self.th)
+        self.bank_step[i] = self.step
+
+    def _bank_features(self) -> tuple[np.ndarray, np.ndarray]:
+        """Every stored place expressed relative to where the agent is and faces now."""
+        used = self.bank_step >= 0
+        out = np.zeros((MEM_N, MEM_F), np.float32)
+        if used.any():
+            dx, dy = self.bank_pose[used, 0] - self.x, self.bank_pose[used, 1] - self.y
+            c, s = math.cos(self.th), math.sin(self.th)
+            fwd, left = c * dx + s * dy, -s * dx + c * dy
+            d = np.hypot(dx, dy)
+            rel = self.bank_pose[used, 2] - self.th
+            out[used, 0] = np.clip(fwd / 1024.0, -4, 4)
+            out[used, 1] = np.clip(left / 1024.0, -4, 4)
+            out[used, 2] = np.minimum(d / 1024.0, 4.0)
+            out[used, 3] = np.exp(-d / 256.0)
+            out[used, 4], out[used, 5] = np.cos(rel), np.sin(rel)
+            out[used, 6] = np.minimum((self.step - self.bank_step[used]) / 500.0, 2.0)
+            out[used, 7:] = self.bank_feat[used]
+        return out, used.astype(np.float32)
+
     def note_exit(self, bearing: float, dist: float) -> None:
         """Remember an exit pad seen at `bearing` (radians, left positive) and `dist` (map units)
         from the current pose. The sighting comes from the network's own exit detector (in training
@@ -206,6 +257,12 @@ class SpatialMemory:
         py = self.y + dist * math.sin(self.th + bearing)
         self._paint(C_EXIT, np.array([px]), np.array([py]))
         self.exits[self._cell(px, py)] = (px, py)
+        used = self.bank_step >= 0  # flag the stored place nearest to the pad
+        if used.any():
+            d = np.hypot(self.bank_pose[:, 0] - px, self.bank_pose[:, 1] - py)
+            d[~used] = np.inf
+            if d.min() < 2 * MEM_SPACING:
+                self.bank_feat[int(np.argmin(d)), 13] = 1.0
 
     # ------------------------------------------------------------------ main entry
     def update(self, obs: dict, action: np.ndarray | None) -> dict:
@@ -314,6 +371,7 @@ class SpatialMemory:
 
         self._frontier(self.fine)
         self._frontier(self.coarse)
+        self._remember_place(dist, hit, etype, mask)
         feats_out = self._features(obs, vit, dist, hit, visited_frac, feats, etype, mask)
         rgb = obs.get("rgb")
         if rgb is None:
@@ -372,7 +430,8 @@ class SpatialMemory:
         rays[0] = dist
         rays[1] = np.exp(-dist * 8.0)
         rays[2 + hit, np.arange(NUM_RAYS)] = 1.0
-        rays[8] = visited_frac
+        # rays[8] (how much of each ray is already-visited grid) stays zero: this network gets no
+        # information from the occupancy grid, only from the attention memory
 
         fine = self._crop(self.fine, FINE, G_FINE)
         coarse = self._crop(self.coarse, COARSE, G_COARSE)
@@ -394,14 +453,19 @@ class SpatialMemory:
              float(any(vit[8:14] > 0))],
             self._pointer(self.exits),
         ]).astype(np.float32)
+        vec[33:45] = 0.0   # pointers to the nearest remembered locked door / door / keycard (grid memory)
+        vec[46:48] = 0.0   # steps since a new grid cell, grid cells visited
+        vec[49:53] = 0.0   # pointer to the remembered exit (grid memory)
         assert vec.shape[0] == VEC_DIM, vec.shape
+        mem, mem_mask = self._bank_features()
 
         ef = np.zeros((feats.shape[0], 5), np.float32)
         ef[:, 0] = np.minimum(feats[:, 0], 4.0)
         ef[:, 1:3] = feats[:, 1:3]
         ef[:, 3:5] = np.clip(feats[:, 3:5] / 16.0, -2, 2)
         ef *= mask[:, None]
-        return {"rays": rays, "map": img, "vec": vec, "ent": ef, "ent_type": (etype * mask).astype(np.int64),
+        return {"mem": mem, "mem_mask": mem_mask,
+                "rays": rays, "map": img, "vec": vec, "ent": ef, "ent_type": (etype * mask).astype(np.int64),
                 "ent_mask": mask.astype(np.float32)}
 
     def pose(self) -> tuple[float, float, float]:

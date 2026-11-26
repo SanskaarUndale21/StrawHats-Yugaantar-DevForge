@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 53, 32, 12
+MEM_N, MEM_F = 96, 22  # scene memory: stored places x features per place
 PRIV_DIM = 12  # training-only ground truth for the critic (never part of the policy's input)
 HEADS = (3, 3, 3, 2, 2, 2)  # move, strafe, turn, attack, use, weapon
 HIDDEN = 256
@@ -101,6 +102,28 @@ class PixelEncoder(nn.Module):
         return F.relu(self.fc(x.flatten(1)))
 
 
+class SceneMemory(nn.Module):
+    """Attention over the places the agent has been (after "scene memory transformer"): each stored
+    place is embedded, the places attend to each other once, and then the current observation asks the
+    memory a question (cross-attention with the present as the query). What to store is fixed; what to
+    look up, and how to use it, is learned."""
+
+    def __init__(self, q_in, d=96, out=128):
+        super().__init__()
+        self.tok = nn.Sequential(nn.Linear(MEM_F, d), nn.ReLU(), nn.Linear(d, d))
+        self.enc = nn.TransformerEncoderLayer(d, 4, 2 * d, dropout=0.0, batch_first=True)
+        self.query = nn.Linear(q_in, d)
+        self.att = nn.MultiheadAttention(d, 4, batch_first=True)
+        self.out = nn.Linear(d + 1, out)
+
+    def forward(self, mem, mask, now):
+        pad = mask < 0.5
+        pad = pad & ~pad.all(1, keepdim=True)  # an empty bank attends to (zero) tokens instead of nothing
+        t = self.enc(self.tok(mem), src_key_padding_mask=pad)
+        a, _ = self.att(self.query(now)[:, None], t, t, key_padding_mask=pad, need_weights=False)
+        return F.relu(self.out(torch.cat([a[:, 0], mask.sum(1, keepdim=True) / MEM_N], -1)))
+
+
 class ExitEye(nn.Module):
     """CNN over a 60x80 colour picture. Trained with a side task (is an exit pad in view, at what
     bearing and range) so that the largest reward in the game does not depend on a 40x30 thumbnail."""
@@ -125,12 +148,12 @@ class DoomNet(nn.Module):
         super().__init__()
         self.rays = RingEncoder(192)
         self.ents = EntitySetPool(64, 4, 128)
-        self.map = MapEncoder(192)
         self.vec = nn.Sequential(nn.Linear(VEC_DIM, 128), nn.ReLU())
         self.pix = PixelEncoder(64)
         self.eye = ExitEye(64)
         self.exit_head = nn.Linear(64, 3)  # [exit pad in view (logit), bearing / 45 deg, range / 1024]
-        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 192 + 128 + 64 + 64, HIDDEN), nn.ReLU())
+        self.mem = SceneMemory(192 + 128 + 128 + 64 + 64)
+        self.fuse = nn.Sequential(nn.Linear(192 + 128 + 128 + 64 + 64 + 128, HIDDEN), nn.ReLU())
         self.gru = nn.GRU(HIDDEN, HIDDEN)
         self.pi = nn.Linear(HIDDEN + HIDDEN, sum(HEADS))
         self.v = nn.Linear(HIDDEN + HIDDEN, 1)
@@ -143,12 +166,11 @@ class DoomNet(nn.Module):
         nn.init.orthogonal_(self.v.weight, 1.0)
 
     def encode(self, o):
-        e = torch.cat([self.rays(o["rays"]), self.ents(o["ent"], o["ent_type"], o["ent_mask"]),
-                       self.map(o["map"].float() if o["map"].dtype != torch.uint8 else o["map"].float() / 255.0),
-                       self.vec(o["vec"]), self.pix(o["rgb"])], -1)
         eye = self.eye(o["rgb2"])
         self.exit_out = self.exit_head(eye)  # read by the agent (to remember the exit) and by the side loss
-        return self.fuse(torch.cat([e, eye], -1))
+        now = torch.cat([self.rays(o["rays"]), self.ents(o["ent"], o["ent_type"], o["ent_mask"]),
+                         self.vec(o["vec"]), self.pix(o["rgb"]), eye], -1)
+        return self.fuse(torch.cat([now, self.mem(o["mem"], o["mem_mask"], now)], -1))
 
     def forward(self, o, h, done=None):
         """o: dict of (T*B, ...) tensors; h: (1, B, H); done: (T, B) episode-start mask. Returns

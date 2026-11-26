@@ -123,7 +123,11 @@ def main():
                 ce, acc = head_ce(split_logits(logits), lab, m)
                 ce = (ce * m).sum() / m.sum().clamp(min=1)
                 aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, AUX.shape[-1])[:, :2])
-                loss = ce + 0.1 * aux_l
+                aux_b = AUX[:, idx].reshape(-1, AUX.shape[-1])
+                ex, seen = net.exit_out, aux_b[:, 2]
+                exit_l = F.binary_cross_entropy_with_logits(ex[:, 0], seen, pos_weight=torch.tensor(20.0, device=dev)) + \
+                    (seen * ((ex[:, 1] - aux_b[:, 3]) ** 2 + (ex[:, 2] - aux_b[:, 4]) ** 2)).sum() / seen.sum().clamp(min=1.0)
+                loss = ce + 0.1 * aux_l + 0.5 * exit_l
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(net.parameters(), 1.0)
