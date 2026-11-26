@@ -75,8 +75,8 @@ def memory_view(mem, size=PANEL):
 class SlamView:
     """The map the agent has built so far, drawn north-up from nothing but its own pose estimate and
     its own ray hits. Explored floor is filled in, walls are joined into lines, doors are green,
-    locked doors red, keys yellow, the path it walked blue. The real level is drawn faintly underneath
-    (viewer only, the agent never sees it) so you can judge how right the map is."""
+    locked doors red, keys yellow, the path it walked blue. Unexplored space stays black: nothing is
+    shown that the agent has not seen itself (pass a layout only for debugging, see --truth)."""
 
     R, N = 8.0, 1024  # map units per pixel, canvas side (covers 8192 units around the start)
     BG, FLOOR, WALL, DOOR, LOCK = (20, 18, 16), (74, 66, 58), (245, 245, 245), (60, 210, 60), (50, 50, 235)
@@ -173,7 +173,7 @@ class SlamView:
         cv2.rectangle(img, (0, size - 22), (size, size), (0, 0, 0), -1)
         x = 8
         for name, col in (("wall", self.WALL), ("door", self.DOOR), ("locked", self.LOCK), ("key", (0, 220, 255)),
-                          ("path", (230, 150, 60)), ("seen floor", self.FLOOR), ("real level", (120, 96, 70))):
+                          ("path", (230, 150, 60)), ("seen floor", self.FLOOR)) +                 (("real level", (120, 96, 70)),) * bool(self.truth):
             cv2.rectangle(img, (x, size - 16), (x + 10, size - 6), col, -1)
             cv2.putText(img, name, (x + 14, size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA)
             x += 22 + cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0][0]
@@ -205,6 +205,7 @@ def main():
     ap.add_argument("--record", default=None)
     ap.add_argument("--lowres", action="store_true", help="show the raw 160x120 evaluation frame")
     ap.add_argument("--tour", action="store_true", help="play benchmark tiers 1-4 one after another")
+    ap.add_argument("--truth", action="store_true", help="debug: draw the real level faintly under the agent's map")
     ap.add_argument("--live", action="store_true", help="play fresh random levels forever, reloading --live-weights "
                     "whenever that file changes (training/aws/live_sync.sh keeps it fresh from the cloud box)")
     ap.add_argument("--live-weights", default=str(ROOT / "training" / "checkpoints" / "live_student.pt"))
@@ -287,7 +288,7 @@ def main():
         agent.reset()
         met = EpisodeMetrics(env, L)
         ps0 = env.privileged_state()
-        slam = SlamView(L, (ps0["x"], ps0["y"], np.radians(ps0["angle"])))
+        slam = SlamView(L if a.truth else None, (ps0["x"], ps0["y"], np.radians(ps0["angle"])))
         done, t, hold = False, 0, 0
         act = np.zeros(len(names), int)
         while not done or hold > 0:
