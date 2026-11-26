@@ -50,6 +50,13 @@ class EpisodeMetrics:
         self.ammo = [g.get_game_variable(a) for a in AMMO]
         self.hit = g.get_game_variable(GV.HITCOUNT)
         self.switches = self.shots = self.hits = self.fire_steps = 0
+        # movement quality
+        self.steps = self.flips = self.idle = self.contact = self.dither = 0
+        self.dist = 0.0
+        self.last_turn = 0     # -1 right, +1 left: the last turn direction pressed
+        self.last_pos = (g.get_game_variable(GV.POSITION_X), g.get_game_variable(GV.POSITION_Y))
+        self.cells128 = {(math.floor(self.last_pos[0] / 128), math.floor(self.last_pos[1] / 128))}
+        self.hist = []
         self._visit()
 
     def _visit(self):
@@ -60,6 +67,23 @@ class EpisodeMetrics:
     def step(self, action) -> None:
         g = self.g
         self.fire_steps += int(action[6])
+        self.steps += 1
+        turn = int(action[4]) - int(action[5])
+        if turn and self.last_turn and turn != self.last_turn:
+            self.flips += 1  # left then right (or back): wobbling instead of holding a line
+        if turn:
+            self.last_turn = turn
+        if not (action[0] or action[1] or action[2] or action[3]):
+            self.idle += 1
+        x, y = g.get_game_variable(GV.POSITION_X), g.get_game_variable(GV.POSITION_Y)
+        self.dist += math.hypot(x - self.last_pos[0], y - self.last_pos[1])
+        self.last_pos = (x, y)
+        self.cells128.add((math.floor(x / 128), math.floor(y / 128)))
+        self.hist.append((x, y))
+        if len(self.hist) >= 50 and len(self.hist) % 50 == 0:  # 50 steps that went nowhere new
+            px, py = self.hist[-50]
+            if math.hypot(x - px, y - py) < 96:
+                self.dither += 1
         w = g.get_game_variable(GV.SELECTED_WEAPON)
         if w != self.weapon:
             self.switches += 1
@@ -91,4 +115,6 @@ class EpisodeMetrics:
             wpn_switches=self.switches, wpn_used=len(self.weapons), secrets=int(g.get_game_variable(GV.SECRETCOUNT)),
             rooms_seen=len(self.visited), rooms_total=self.n_rooms if self.n_rooms is not None else float("nan"),
             rooms_hostile=len(hostile), rooms_cleared=cleared,
+            steps=self.steps, turn_flips=self.flips, idle_steps=self.idle, dist=self.dist,
+            new_cells=len(self.cells128), stuck_windows=self.dither,
         )

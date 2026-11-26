@@ -147,7 +147,10 @@ def _detail(rs):
     return (f"kill% {100 * R('kills', 'monsters'):.0f}  aim {100 * R('hits', 'shots'):.0f}% of {S('shots') / n:.0f} shots  "
             f"dmg dealt {S('dmg_dealt') / n:.0f} taken {S('damage') / n:.0f}  wpn switches {S('wpn_switches') / n:.1f} "
             f"(guns used {S('wpn_used') / n:.1f})  rooms seen {100 * R('rooms_seen', 'rooms_total'):.0f}%  "
-            f"cleared {100 * R('rooms_cleared', 'rooms_hostile'):.0f}%  items {S('items') / n:.1f}  secrets {S('secrets') / n:.2f}")
+            f"cleared {100 * R('rooms_cleared', 'rooms_hostile'):.0f}%  items {S('items') / n:.1f}  secrets {S('secrets') / n:.2f}\n"
+            f"         movement: turn wobbles {100 * R('turn_flips', 'steps'):.1f} per 100 steps  standing still "
+            f"{100 * R('idle_steps', 'steps'):.0f}%  walked {S('dist') / n:.0f} units  new ground per 1000 units "
+            f"{1000 * R('new_cells', 'dist'):.1f} cells  stuck spells {S('stuck_windows') / n:.1f}/game")
 
 
 def summarize(label, res):
