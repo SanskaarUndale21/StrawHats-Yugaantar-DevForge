@@ -4,9 +4,9 @@ The observation has no global coordinates, so the agent keeps its own private fr
   * heading is integrated from its own TURN actions (ViZDoom's keyboard turn profile: the first five
     held tics turn slowly, then full speed; measured in training/README.md),
   * position is integrated from the ego-frame velocity in `vitals` (trapezoid rule over the 4 tics),
-  * then the pose is corrected by scan matching: this step's wall hits are slid over the walls already
-    in the map and the best fit wins (the engine keeps reporting velocity while the player is stuck
-    against a wall, so dead reckoning alone drifts by whole rooms).
+  * while touching a wall or a monster the step is re-estimated by scan matching against the previous
+    scan (the engine keeps reporting velocity while the player is stuck, so dead reckoning alone
+    drifts by whole rooms).
 
 Every step the 64 rays paint free space / walls / doors / locked doors into a toroidal grid at two
 resolutions (64 and 256 map units per cell); keycards and pickups seen in `visible_entities` are
@@ -26,16 +26,13 @@ NUM_RAYS = 64
 RAY_RANGE = 1024.0
 SLOW_TURN, FAST_TURN, SLOW_TICS = 1.7578125, 3.515625, 5  # degrees per tic
 FRAME_SKIP = 4
-VEL_A, VEL_B = 1.683, 2.493  # fitted in training/calibrate_odometry.py
+VEL_A, VEL_B = 1.5197, 2.8941  # exact for constant thrust under Doom friction 0.90625 (4 tics)
 DEAD_TICS = 7  # the engine ignores input for the first 7 tics of an episode (measured)
 
-# scan matching: wall hits are stamped into a fine toroidal grid and later scans are aligned to it
-M_RES, G_MATCH = 16.0, 512  # 16 map units per cell, spans the same 8192 units as the map
-_off = np.arange(-48.0, 48.1, 8.0)
-_OX, _OY = [a.ravel() for a in np.meshgrid(_off, _off, indexing="ij")]
-_PRIOR = 0.1 * (_OX**2 + _OY**2) / 64.0  # prefer the odometry guess where the walls do not decide
-_ZERO = int(np.argmin(_OX**2 + _OY**2))
-_ST = [(dx, dy, 4 - 2 * abs(dx) - 2 * abs(dy) + abs(dx * dy)) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]  # 4 / 2 / 1
+# contact correction: while touching a wall or a monster the engine still reports velocity, so the
+# step is re-estimated by sliding this scan onto the previous one (point-to-line fit)
+CONTACT = 28.0   # map units; the player radius is 16
+FIT_PRIOR = 1.0  # weight of the odometry guess; it decides the direction the walls leave free
 
 FINE, COARSE = 64.0, 256.0
 G_FINE, G_COARSE = 128, 32  # both span 8192 map units, wrapped (toroidal)
@@ -74,7 +71,9 @@ class SpatialMemory:
         self.th = 0.0  # radians, CCW
         self.turnheld = 0
         self.tic = 0
-        self.hitg = np.zeros((G_MATCH, G_MATCH), np.uint8)
+        self.pscan = None
+        self.ppos = (0.0, 0.0)
+        self.pcontact = False
         self.prev_vel = np.zeros(2)
         self.prev_action = np.zeros(9, np.float32)
         self.step = 0
@@ -108,26 +107,44 @@ class SpatialMemory:
         self.prev_vel = np.array(vel_fr, np.float64)
 
     # ------------------------------------------------------------------ scan matching
-    def _match(self, ex: np.ndarray, ey: np.ndarray) -> None:
-        """ex, ey: this step's static wall hits relative to the agent (world-aligned axes).
-        Slide them over the remembered walls, move the pose to the best fit, then remember new walls."""
-        if len(ex) >= 6 and self.step > 1:
-            ix = np.floor((self.x + ex[None, :] + _OX[:, None]) / M_RES).astype(np.int64) % G_MATCH
-            iy = np.floor((self.y + ey[None, :] + _OY[:, None]) / M_RES).astype(np.int64) % G_MATCH
-            hits = self.hitg[ix, iy]
-            score = hits.sum(1).astype(np.float64) - _PRIOR
-            b = int(np.argmax(score))
-            # only trust the fit when enough of the scan lands on known walls
-            if b != _ZERO and (hits[b] > 0).sum() >= max(6, len(ex) // 3) and score[b] > score[_ZERO] + 2.0:
-                self.x += _OX[b]
-                self.y += _OY[b]
-        cx = np.floor((self.x + ex) / M_RES).astype(np.int64)
-        cy = np.floor((self.y + ey) / M_RES).astype(np.int64)
-        new = self.hitg[cx % G_MATCH, cy % G_MATCH] == 0  # first sighting anchors a wall: no creep
-        cx, cy = cx[new], cy[new]
-        for dx, dy, w in _ST:
-            jx, jy = (cx + dx) % G_MATCH, (cy + dy) % G_MATCH
-            self.hitg[jx, jy] = np.maximum(self.hitg[jx, jy], w)
+    def _refit(self, d_odo: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """Displacement since the previous scan. q: this step's wall hits relative to the agent
+        (world-aligned axes); the previous scan is kept as wall segments around the previous pose.
+        Point-to-line least squares: walls fix the motion across them, the odometry guess keeps the
+        motion along them (so a plain corridor cannot fake "I did not move")."""
+        A, AB, N, L2 = self.pscan
+        if len(A) < 4 or len(q) < 8:
+            return d_odo
+        d = d_odo.copy()
+        for tol in (40.0, 20.0, 12.0):
+            pts = q + d
+            rel = pts[:, None, :] - A[None]
+            t = np.clip((rel * AB[None]).sum(2) / L2[None], 0.0, 1.0)
+            diff = rel - t[..., None] * AB[None]
+            dist = np.hypot(diff[..., 0], diff[..., 1])
+            j = np.argmin(dist, 1)
+            ok = dist[np.arange(len(q)), j] < tol
+            if ok.sum() < 8:
+                return d_odo
+            n = N[j[ok]]
+            r = (n * (A[j[ok]] - q[ok])).sum(1)  # want n . (d + q - A) = 0
+            H = n.T @ n + FIT_PRIOR * np.eye(2)
+            d = np.linalg.solve(H, n.T @ r + FIT_PRIOR * d_odo)
+        if np.hypot(*(d - d_odo)) > 1.5 * np.hypot(*d_odo) + 12.0:
+            return d_odo
+        return d
+
+    @staticmethod
+    def _segments(ex, ey, static, dunits):
+        """Join neighbouring wall hits that lie on the same wall (no depth jump) into segments."""
+        nx, ny = np.roll(ex, -1), np.roll(ey, -1)
+        gap = np.hypot(nx - ex, ny - ey)
+        pair = static & np.roll(static, -1) & (gap > 1e-3) & (gap < 0.5 * np.minimum(dunits, np.roll(dunits, -1)) + 24.0)
+        A = np.stack([ex[pair], ey[pair]], 1)
+        AB = np.stack([(nx - ex)[pair], (ny - ey)[pair]], 1)
+        L2 = (AB**2).sum(1)
+        N = np.stack([-AB[:, 1], AB[:, 0]], 1) / np.sqrt(L2)[:, None] if len(A) else AB
+        return A, AB, N, L2
 
     # ------------------------------------------------------------------ map writes
     def _paint(self, ch: int, wx: np.ndarray, wy: np.ndarray, value: float = 1.0) -> None:
@@ -158,7 +175,13 @@ class SpatialMemory:
         dunits = dist.astype(np.float64) * RAY_RANGE
 
         static = ((hit == RAY_WALL) | (hit == RAY_DOOR) | (hit == RAY_LOCK)) & (dist < 0.97)
-        self._match(ca[static] * dunits[static], sa[static] * dunits[static])
+        ex, ey = ca * dunits, sa * dunits
+        contact = bool((dunits[(hit >= RAY_WALL) & (hit <= RAY_ENEMY)] < CONTACT).any())
+        if self.pscan is not None and (contact or self.pcontact):
+            d = self._refit(np.array([self.x - self.ppos[0], self.y - self.ppos[1]]), np.stack([ex[static], ey[static]], 1))
+            self.x, self.y = self.ppos[0] + d[0], self.ppos[1] + d[1]
+        self.pscan = self._segments(ex, ey, static, dunits)
+        self.ppos, self.pcontact = (self.x, self.y), contact
 
         # novelty along each ray, measured before this step's visit is recorded
         s = dunits[:, None] * _NOV_SAMPLES[None, :]
