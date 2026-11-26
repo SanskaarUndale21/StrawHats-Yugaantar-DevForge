@@ -38,5 +38,5 @@ rl() {
 case "$PHASE" in
   distill) distill ;;
   rl) rl ;;
-  full) distill && rl ;;
+  full) distill; pkill -f "[v]izdoom" 2>/dev/null; sleep 2; rl ;;
 esac

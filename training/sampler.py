@@ -185,14 +185,12 @@ class AsyncSampler:
         self.beta.value = float(b)
 
     def close(self):
+        """Stop the actors. They are terminated, not asked: an actor blocked handing over a rollout
+        never reads its pipe, and a polite "close" message then blocks the learner forever once the
+        pipe is full of weights (this hung the end of a distillation run for an hour)."""
         self._closing = True
-        time.sleep(0.2)
-        for c in self.conns:
-            try:
-                c.send("close")
-            except Exception:
-                pass
-        time.sleep(1.0)
         for p in self.procs:
             if p.is_alive():
                 p.terminate()
+        for p in self.procs:
+            p.join(timeout=3)
