@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
-from common import learner_device, load_checkpoint, to_t  # noqa: E402
+from common import head_ce, learner_device, load_checkpoint, to_t  # noqa: E402
 from model import DoomNet, load_compatible, split_logits  # noqa: E402
 from sampler import AsyncSampler  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
@@ -120,10 +120,7 @@ def main():
                 logits, _, _, core = net(o, h0[:, idx], ST[:, idx])
                 lab = LAB[:, idx].reshape(T * n, -1)
                 m = (lab[:, 0] >= 0).float()
-                ce, acc = 0.0, []
-                for j, l in enumerate(split_logits(logits)):
-                    ce = ce + F.cross_entropy(l, lab[:, j].clamp(min=0), reduction="none")
-                    acc.append((((l.argmax(-1) == lab[:, j]).float() * m).sum() / m.sum().clamp(min=1)).item())
+                ce, acc = head_ce(split_logits(logits), lab, m)
                 ce = (ce * m).sum() / m.sum().clamp(min=1)
                 aux_l = F.binary_cross_entropy_with_logits(net.aux(core), AUX[:, idx].reshape(-1, 2))
                 loss = ce + 0.1 * aux_l

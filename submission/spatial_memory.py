@@ -184,8 +184,12 @@ class SpatialMemory:
         rgb = obs.get("rgb")
         if rgb is None:
             feats_out["rgb"] = np.zeros((3, RGB_H, RGB_W), np.uint8)
-        else:  # 4x4 area average of the 120x160 frame -> (3, 30, 40) uint8
-            small = np.asarray(rgb, np.float32).reshape(RGB_H, 4, RGB_W, 4, 3).mean((1, 3))
+        else:  # area-average down to (3, RGB_H, RGB_W) uint8, from any input resolution
+            arr = np.asarray(rgb, np.float32)
+            H, W = arr.shape[:2]
+            fh, fw = max(H // RGB_H, 1), max(W // RGB_W, 1)
+            arr = arr[: fh * RGB_H, : fw * RGB_W]
+            small = arr.reshape(RGB_H, fh, RGB_W, fw, 3).mean((1, 3))
             feats_out["rgb"] = small.transpose(2, 0, 1).astype(np.uint8)
         if action is not None:
             self.prev_action = np.asarray(action, np.float32)

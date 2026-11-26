@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
-from common import RunningStat, evaluate_actions, learner_device, load_checkpoint, to_t  # noqa: E402
+from common import RunningStat, evaluate_actions, head_ce, learner_device, load_checkpoint, to_t  # noqa: E402
 from model import DoomNet, load_compatible, split_logits  # noqa: E402
 from sampler import AsyncSampler  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
@@ -209,8 +209,7 @@ def main():
                     lab = LAB[:, idx].reshape(T * n, -1)
                     m = (lab[:, 0] >= 0).float()
                     if m.sum() > 0:
-                        bc = sum(F.cross_entropy(l, lab[:, j].clamp(min=0), reduction="none")
-                                 for j, l in enumerate(split_logits(logits)))
+                        bc, _ = head_ce(split_logits(logits), lab, m)
                         bc = (bc * m).sum() / m.sum()
                         loss = loss + bc_w * bc
                         stats["bc"].append(bc.item())
