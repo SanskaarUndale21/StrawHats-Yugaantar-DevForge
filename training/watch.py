@@ -146,6 +146,7 @@ class SlamView:
     C_FREE, C_WALL = (58, 50, 44), (255, 255, 255)
     C_PATH, C_SCAN, C_AGENT = (255, 190, 70), (90, 90, 255), (0, 165, 255)
     C_DOOR, C_LOCK, C_KEY, C_TEXT = (90, 225, 90), (80, 80, 255), (0, 215, 255), (235, 235, 235)
+    C_MEMORY = (255, 120, 255)
 
     @staticmethod
     def _label(img, text, org, col, scale=0.42):
@@ -207,6 +208,9 @@ class SlamView:
             cv2.rectangle(m, (a[0] - 6, a[1] - 6), (a[0] + 6, a[1] + 6), col, 2 if opened else -1, cv2.LINE_AA)
             name = ("LOCKED DOOR" if locked else "DOOR") + (" (opened)" if opened else "")
             self._label(m, name, (a[0] + 10, a[1] + 4), col)
+        if hasattr(mem, "bank_step"):                    # scene memory: the places it has stored
+            for bx, by in mem.bank_pose[mem.bank_step >= 0][:, :2]:
+                cv2.circle(m, pt(bx, by), 4, self.C_MEMORY, 1, cv2.LINE_AA)
         for kx, ky in mem.keys.values():
             a = pt(kx, ky)
             cv2.drawMarker(m, a, self.C_KEY, cv2.MARKER_DIAMOND, 12, 2, cv2.LINE_AA)
@@ -232,7 +236,8 @@ class SlamView:
         cv2.line(img, (0, size - FOOT), (size, size - FOOT), (60, 60, 60), 1)
         rows = ((("Unexplored", (0, 0, 0)), ("Free space", self.C_FREE), ("Wall", self.C_WALL), ("Laser scan", self.C_SCAN),
                  ("Path travelled", self.C_PATH)),
-                (("Agent", self.C_AGENT), ("Door", self.C_DOOR), ("Locked door", self.C_LOCK), ("Keycard", self.C_KEY)))
+                (("Agent", self.C_AGENT), ("Door", self.C_DOOR), ("Locked door", self.C_LOCK), ("Keycard", self.C_KEY))
+                + ((("Remembered place", self.C_MEMORY),) if hasattr(mem, "bank_step") else ()))
         for r, items in enumerate(rows):
             x, y = 10, size - FOOT + 17 + 19 * r
             for name, col in items:
