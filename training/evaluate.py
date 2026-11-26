@@ -85,6 +85,7 @@ def _run_one(job):
 
     torch.set_num_threads(1)
     from doom_env import make_env
+    from metrics import EpisodeMetrics
     from rewards import RewardShaper
 
     wad, name, L, T = _make_level(spec)
@@ -111,6 +112,7 @@ def _run_one(job):
         act = agent.act
     shaper = RewardShaper()
     shaper.reset(env.privileged_state())
+    met = EpisodeMetrics(env, L)
     done = False
     tic = 0
     while not done:
@@ -118,13 +120,16 @@ def _run_one(job):
         obs, _, te, tr, info = env.step(a)
         ps = env.privileged_state()
         shaper(ps, a)
+        met.step(a)
         tic = ps["tic"] if not ps["finished"] else tic + 4
         done = te or tr
     ps = env.privileged_state()
     st = dict(shaper.stats)
+    extra = met.result(st["kills"])
     env.close()
     return dict(level=lid, tier=tier, exit=bool(ps["exit_reached"]), dead=bool(ps["dead"]), kills=st["kills"],
-                keys=st["keys"], unlocks=st["unlocks"], cells=st["cells"], score=_score(ps, st, min(tic, T), T))
+                keys=st["keys"], unlocks=st["unlocks"], doors=st["doors"], cells=st["cells"], items=st["items"],
+                damage=st["damage"], score=_score(ps, st, min(tic, T), T), **extra)
 
 
 def evaluate(who, weights, levels, seeds, procs):
@@ -132,6 +137,17 @@ def evaluate(who, weights, levels, seeds, procs):
     with mp.get_context("spawn").Pool(procs) as pool:
         res = [r for r in pool.map(_run_one, jobs, chunksize=1) if r is not None]
     return res
+
+
+def _detail(rs):
+    """Combat / coverage detail line: sums over episodes, so empty episodes do not skew the ratios."""
+    S = lambda k: float(np.nansum([r[k] for r in rs]))  # noqa: E731
+    R = lambda a, b: S(a) / S(b) if S(b) else float("nan")  # noqa: E731
+    n = len(rs)
+    return (f"kill% {100 * R('kills', 'monsters'):.0f}  aim {100 * R('hits', 'shots'):.0f}% of {S('shots') / n:.0f} shots  "
+            f"dmg dealt {S('dmg_dealt') / n:.0f} taken {S('damage') / n:.0f}  wpn switches {S('wpn_switches') / n:.1f} "
+            f"(guns used {S('wpn_used') / n:.1f})  rooms seen {100 * R('rooms_seen', 'rooms_total'):.0f}%  "
+            f"cleared {100 * R('rooms_cleared', 'rooms_hostile'):.0f}%  items {S('items') / n:.1f}  secrets {S('secrets') / n:.2f}")
 
 
 def summarize(label, res):
@@ -144,6 +160,8 @@ def summarize(label, res):
                   f"{np.mean([r['dead'] for r in rs]):.2f}  kills {np.mean([r['kills'] for r in rs]):.1f}  keys "
                   f"{np.mean([r['keys'] for r in rs]):.2f}  unlocks {np.mean([r['unlocks'] for r in rs]):.2f}  "
                   f"cells {np.mean([r['cells'] for r in rs]):.0f}  score {np.mean([r['score'] for r in rs]):.1f}")
+            print("    " + _detail(rs))
+    print("  all    " + _detail(res))
     return tot
 
 

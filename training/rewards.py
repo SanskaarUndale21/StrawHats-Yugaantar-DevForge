@@ -25,7 +25,7 @@ class RewardShaper:
         self.door_ids = np.flatnonzero(dl >= 0) if dl is not None else np.zeros(0, int)
         self.door_lock = dl
         self.opened = set()
-        self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0)
+        self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0)
         self.last_use = 0
 
     @staticmethod
@@ -47,6 +47,7 @@ class RewardShaper:
         di = ps["items"] - self.items
         if di > 0:
             r += W["item"] * di
+            st["items"] += di
         dd = ps["damage_taken"] - self.damage
         if dd > 0:
             r -= W["damage"] * dd
