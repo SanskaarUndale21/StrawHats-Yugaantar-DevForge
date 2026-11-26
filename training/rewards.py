@@ -45,6 +45,13 @@ class Navigator:
         self.keys = {(r, c): KEY_THINGS[t] for t, r, c, _ in layout.things if t in KEY_THINGS}
         self.exit = next(((r, c) for r in range(self.h) for c in range(self.w) if self.g[r][c] == "E"), None)
         self.floor = sum(1 for row in self.g for ch in row if ch != "#")
+        from mapgen import MONSTERS
+
+        kinds = {m[0] for m in MONSTERS}
+        self.n_monsters = sum(1 for t, _, _, _ in layout.things if t in kinds)
+        # the 128-unit areas that contain floor (what the exploration score counts)
+        self.area = {(int(math.floor((c * CELL + CELL / 2) / AREA)), int(math.floor((-(r + 1) * CELL + CELL / 2) / AREA)))
+                     for r in range(self.h) for c in range(self.w) if self.g[r][c] != "#"}
         self._fields = {}
 
     @staticmethod
@@ -81,15 +88,23 @@ class Navigator:
             self._fields[key] = f
         return f
 
-    def objective(self, cell, held):
-        """('exit' | 'key' | None, goal cell, distance field)."""
+    def exit_distance(self, cell, held):
+        """Walking distance (cells) to the exit, or None while it cannot be reached."""
+        if self.exit is None or not (0 <= cell[0] < self.h and 0 <= cell[1] < self.w):
+            return None
+        d = float(self.field(self.exit, held)[cell])
+        return d if np.isfinite(d) else None
+
+    def objective(self, cell, held, leave=True):
+        """('exit' | 'key' | None, goal cell, distance field). While the exit is reachable but it is
+        not yet time to leave (`leave` False) there is no objective: the level's other goals come first."""
         inside = 0 <= cell[0] < self.h and 0 <= cell[1] < self.w
         if not inside:
             return None, None, None
         if self.exit is not None:
             f = self.field(self.exit, held)
             if np.isfinite(f[cell]):
-                return "exit", self.exit, f
+                return ("exit", self.exit, f) if leave else (None, None, None)
         best = None
         for kc, col in self.keys.items():
             if col in held:
@@ -101,8 +116,11 @@ class Navigator:
 
 
 class RewardShaper:
-    W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
-             exit=12.0, exit_health=3.0, exit_time=6.0, death=4.5, step=0.002, use_spam=0.003,
+    # The scorer pays for the exit most, but also for kills, new areas, keycards and doors, and the
+    # episode ends at the exit; its time bonus is "small". So the time bonus here is small too and new
+    # ground pays more than before: leaving with enemies alive and rooms unseen must not be the best deal.
+    W = dict(explore=0.1, kill=1.0, item=0.1, damage=0.02, key=4.0, door=0.5, unlock=4.0,
+             exit=12.0, exit_health=3.0, exit_time=1.0, death=4.5, step=0.002, use_spam=0.003,
              # survival (it died in a third to a half of gauntlets): damage and death cost more, and
              # health picked up while hurt pays per point regained
              heal=0.01,
@@ -118,6 +136,8 @@ class RewardShaper:
     def reset(self, ps: dict, layout=None) -> None:
         self.nav = Navigator(layout) if layout is not None else None
         self._obj, self._d, self._field = None, None, None
+        self._leave = False
+        self.kills0 = ps["kills"]
         self._ps = ps
         self.cells = {self._cell(ps)}
         self.visits = {self._cell(ps): 1}
@@ -189,7 +209,7 @@ class RewardShaper:
         if self.nav is not None and not ps["finished"]:
             cell = self.nav.cell(ps["x"], ps["y"])
             held = self.nav.held(ps)
-            kind, goal, field = self.nav.objective(cell, held)
+            kind, goal, field = self.nav.objective(cell, held, self._time_to_leave(ps, cell, held))
             obj = (kind, goal, held)
             d = float(field[cell]) if kind else None
             if kind and obj == self._obj and self._d is not None:
@@ -241,6 +261,18 @@ class RewardShaper:
                 st["death"] = 1
         return r
 
+    def _time_to_leave(self, ps, cell, held) -> bool:
+        """Head for the exit only when the level is done (all enemies dead and nearly all of it walked),
+        or when staying is the bigger risk: low health, over half the time gone, or just enough time
+        left for the way back. Once true it stays true."""
+        if not self._leave:
+            left = (ps["episode_ticks"] - ps["tic"]) / 4.0  # decision steps left
+            d = self.nav.exit_distance(cell, held)
+            done = ps["kills"] - self.kills0 >= self.nav.n_monsters and len(self.cells) >= 0.85 * len(self.nav.area)
+            self._leave = bool(done or ps["health"] < 35 or ps["tic"] > 0.55 * ps["episode_ticks"]
+                               or (d is not None and left < d * 3.0 * 1.8))
+        return self._leave
+
     # ------------------------------------------------------------------ training-only side information
     def priv_features(self) -> np.ndarray:
         """What the critic may know and the policy may not: the objective, the true distance to it and
@@ -253,7 +285,7 @@ class RewardShaper:
             return f
         f[0] = 1.0
         cell = self.nav.cell(ps["x"], ps["y"])
-        kind, goal, field = self.nav.objective(cell, self.nav.held(ps))
+        kind, goal, field = self.nav.objective(cell, self.nav.held(ps), self._leave)
         f[1], f[2], f[3] = kind == "exit", kind == "key", kind is None
         f[9] = min(len(self.cells) / max(self.nav.floor / 4.0, 1.0), 2.0)
         if kind is None:
