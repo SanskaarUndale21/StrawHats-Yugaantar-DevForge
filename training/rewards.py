@@ -103,7 +103,11 @@ class Navigator:
 class RewardShaper:
     W = dict(explore=0.04, kill=1.0, item=0.1, damage=0.01, key=4.0, door=0.5, unlock=4.0,
              exit=12.0, exit_health=3.0, exit_time=6.0, death=3.0, step=0.002, use_spam=0.003,
-             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.004,
+             hit=0.05, miss=0.02, dmg_dealt=0.003, weapon=0.5, revisit=0.008,
+             # walking properly: reversing a turn or forward/back costs, and so does standing around
+             # (measured on the copied policy: 12 left-right and 6.7 forward-back reversals per 100
+             # steps, idle on 26-29% of steps)
+             turn_flip=0.004, move_flip=0.004, idle=0.001,
              # paid per 64-unit cell of true walking distance gained toward the next objective (and
              # taken back when it is lost again, so walking in circles earns exactly nothing)
              progress=0.06)
@@ -124,8 +128,9 @@ class RewardShaper:
         self.door_lock = dl
         self.opened = set()
         self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0, shots=0, hits=0,
-                          revisits=0, progress=0.0)
+                          revisits=0, progress=0.0, flips=0, idle=0)
         self.last_use = 0
+        self.last_turn = self.last_move = 0
 
     @staticmethod
     def _cell(ps):
@@ -160,6 +165,17 @@ class RewardShaper:
             if nw > self.nweap:
                 r += W["weapon"] * (nw - self.nweap)
             self.hit, self.dealt, self.ammo, self.nweap = ps["hitcount"], ps["dmg_dealt"], ps["ammo_sum"], nw
+        turn, move = int(action[4]) - int(action[5]), int(action[0]) - int(action[1])
+        if turn and self.last_turn and turn != self.last_turn:
+            r -= W["turn_flip"]
+            st["flips"] += 1
+        if move and self.last_move and move != self.last_move:
+            r -= W["move_flip"]
+            st["flips"] += 1
+        self.last_turn, self.last_move = turn or self.last_turn, move or self.last_move
+        if not (action[0] or action[1] or action[2] or action[3] or action[6]):
+            r -= W["idle"]
+            st["idle"] += 1
         self._ps = ps
         if self.nav is not None and not ps["finished"]:
             cell = self.nav.cell(ps["x"], ps["y"])

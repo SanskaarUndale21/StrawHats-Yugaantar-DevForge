@@ -91,6 +91,7 @@ def main():
                     help="stop updating on a batch once the policy moved this far from the one that played it")
     ap.add_argument("--exit-coef", type=float, default=0.5, help="weight of the exit detector's side loss")
     ap.add_argument("--fresh-lr-mult", type=float, default=10.0, help="learning-rate multiplier for newly added modules")
+    ap.add_argument("--load-eye", default=None, help="pre-trained exit detector from training/pretrain_exit.py")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
@@ -125,6 +126,11 @@ def main():
     elif a.init:
         skipped = load_compatible(net, load_checkpoint(a.init, dev)["model"])
         print(f"initialised policy from {a.init} (new tensors: {len(skipped)})")
+    if a.load_eye and Path(a.load_eye).exists():
+        eye_ck = torch.load(a.load_eye, map_location=dev)
+        net.eye.load_state_dict(eye_ck["eye"])
+        net.exit_head.load_state_dict(eye_ck["exit_head"])
+        print(f"exit detector loaded from {a.load_eye}", flush=True)
     stage_start, step0, warm0 = step, step, update
 
     B_roll = a.batch_rollouts or a.workers
@@ -281,6 +287,9 @@ def main():
                        cells=np.mean([e["cells"] for e in E]), keys=np.mean([e["keys"] for e in E]),
                        doors=np.mean([e["doors"] for e in E]), unlocks=np.mean([e["unlocks"] for e in E]),
                        progress=np.mean([e.get("progress", 0.0) for e in E]),
+                       flips100=100 * np.sum([e.get("flips", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
+                       idle=np.sum([e.get("idle", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
+                       revisits=np.mean([e.get("revisits", 0) for e in E]),
                        lag=R["lag"], t_wait=t_wait, t_upd=t_upd, **{k: float(np.mean(v)) for k, v in stats.items()})
             if update % 10 == 0:
                 print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()), flush=True)
