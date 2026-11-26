@@ -326,7 +326,7 @@ class Teacher:
             tol = max(1.5, math.degrees(math.atan2(15.0, max(dist, 1.0))))
             self._turn_towards(b, err, tol=tol)
             on_target = abs(err) < tol
-            if on_target or dist < 110:
+            if (on_target and vit[2] > 1) or dist < 110:  # never swing fists at something out of reach
                 b[6] = 1
             rd = np.asarray(obs["rays"]["distance"])
             left_room, right_room = rd[14:19].min(), rd[46:51].min()

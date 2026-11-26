@@ -316,6 +316,7 @@ def main():
                        revisits=np.mean([e.get("revisits", 0) for e in E]),
                        blocked=np.sum([e.get("blocked", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        use_waste=np.mean([e.get("use_waste", 0) for e in E]),
+                       futile=np.sum([e.get("futile", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        **{f"exit_{k}": float(np.mean(kind_hist[k])) if kind_hist[k] else 0.0 for k in KINDS},
                        **{f"mix_{k}": float(kind_w[i]) if kind_w is not None else 0.0 for i, k in enumerate(KINDS)},
                        lag=R["lag"], t_wait=t_wait, t_upd=t_upd, **{k: float(np.mean(v)) for k, v in stats.items()})

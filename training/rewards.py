@@ -138,6 +138,12 @@ class RewardShaper:
              # whole game pressed against a wall)
              turn_flip=0.02, move_flip=0.02, idle=0.006, idle_busy=0.006, blocked=0.012, use_waste=0.01,
              swap=0.01,  # per press of "next weapon": nothing else discouraged cycling guns for no reason
+             # Freezes (60 key/gauntlet games, 4-5 with a motionless stretch of 100-665 steps): in every one
+             # the policy stood still holding FIRE on 98-100% of the steps and pressed nothing else, at a
+             # target 140-360 units away, twice with bare fists, once for 665 steps at 13 health. Punching
+             # uses no ammo, so nothing counted those as misses. Firing that has landed nothing for
+             # 6 steps in a row now costs every step until something is hit or the trigger is released.
+             futile_fire=0.02,
              progress=0.06)
 
     def reset(self, ps: dict, layout=None) -> None:
@@ -158,9 +164,11 @@ class RewardShaper:
         self.door_lock = dl
         self.opened = set()
         self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0, shots=0, hits=0,
-                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0, blocked=0,
+                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0, blocked=0, futile=0,
                           use_waste=0)
         self.last_use = 0
+        self.fire_run = 0
+        self.hit_seen = ps.get("hitcount", 0.0)
         self.since_use = 1000
         self.px, self.py = ps["x"], ps["y"]
         self.health = ps["health"]
@@ -212,6 +220,13 @@ class RewardShaper:
             r -= W["move_flip"]
             st["flips"] += 1
         self.last_turn, self.last_move = turn or self.last_turn, move or self.last_move
+        if "hitcount" in ps:
+            landed = ps["hitcount"] > self.hit_seen
+            self.hit_seen = ps["hitcount"]
+            self.fire_run = 0 if (landed or not action[6]) else self.fire_run + 1
+            if self.fire_run > 6:
+                r -= W["futile_fire"]
+                st["futile"] += 1
         pressing = bool(action[0] or action[1] or action[2] or action[3])
         if not pressing:  # keep moving: more so in a fight (dodge) and at a door (go through it)
             r -= W["idle_busy"] if (ps.get("enemy_visible") or ps.get("door_ahead")) else W["idle"]
