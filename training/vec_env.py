@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "submission"))
 sys.path.insert(0, str(ROOT / "training"))
 
 FEAT_KEYS = ("rays", "map", "vec", "ent", "ent_type", "ent_mask", "rgb", "rgb2", "priv")
+EXIT_LOGIT = 0.405  # sigmoid^-1(0.6): the confidence at which a sighting is remembered (agent.EXIT_CONFIDENCE)
 
 
 def _hires_timer():
@@ -234,20 +235,23 @@ class _Slot:
         return obs, self._features(obs, None)
 
     def _features(self, obs, buttons):
-        """Policy features plus the training-only extras (critic side information). When the exit pad
-        is truly in view it is written to the agent's memory here, exactly as its own detector does
-        at evaluation; a little noise and some misses keep the policy from trusting it blindly."""
+        """Policy features plus the training-only extras: side information for the critic and the
+        target the exit detector is supervised with. The agent's memory of exits is filled from the
+        detector's own output (see step), never from this ground truth: fed the truth in training,
+        the policy learned to lean on a memory that the still-untrained detector left empty at
+        evaluation, and the benchmark fell from 231 to 155 before the policy loss was even on."""
         feats = self.mem.update(obs, buttons)
         feats["priv"] = self.shaper.priv_features()
         self.exit_t = self.shaper.exit_targets(obs)
-        if self.exit_t[0] > 0 and self.rng.random() > 0.15:
-            self.mem.note_exit(self.exit_t[1] * 0.7853981 + self.rng.gauss(0, 0.03),
-                               self.exit_t[2] * 1024.0 * (1.0 + self.rng.gauss(0, 0.05)))
         return feats
 
-    def step(self, choice):
+    def step(self, choice, exit_pred=None):
         """choice: the learner's head choices (6,). In distill mode the teacher's action is executed
-        with probability beta (DAgger). Returns the teacher's label for the state (or -1s)."""
+        with probability beta (DAgger). Returns the teacher's label for the state (or -1s).
+        exit_pred: the network's exit-detector output for the current observation; a confident
+        sighting is stored in the agent's memory, the same rule as in submission/agent.py."""
+        if exit_pred is not None and exit_pred[0] > EXIT_LOGIT:
+            self.mem.note_exit(float(np.clip(exit_pred[1], -1, 1)) * 0.7853981, float(np.clip(exit_pred[2], 0.02, 1.2)) * 1024.0)
         from model import to_buttons
         from rewards import aux_targets
         from teacher import buttons_to_choice

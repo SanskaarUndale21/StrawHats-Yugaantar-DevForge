@@ -37,14 +37,16 @@ rl() {
   # 245 -> 160-200 within 2.5M steps while the entropy rose. So: the value head gets 150 updates
   # (about 1M steps) before the policy moves at all, and the policy then moves slowly with almost
   # no entropy bonus and a strong teacher-label term.
-  # rl-first branch: rewards are the main engine. The teacher is only a kick-start whose weight
-  # fades to zero over the first 20M steps and is then switched off; progress toward the objective
-  # is rewarded by true walking distance and the critic reads ground truth (see training/rewards.py).
+  # rl-first branch: rewards are the main engine. The policy starts from the distilled student, so
+  # the kick-start is already in its weights; the teacher-label term is off by default (BC_COEF=0),
+  # because the scripted teacher is stateful and its labels drift on states it did not drive itself.
+  # Progress toward the objective is rewarded by true walking distance and the critic reads ground
+  # truth (see training/rewards.py).
   # fine-tuning a trained student: small learning rate, bounded policy change per batch, the teacher
   # still labelling the states the policy itself reaches (also after a resume), and a
   # faster march through the curriculum stages (each is forced after 6M steps at the latest)
   uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED \
-    --epochs 1 --lr 5e-5 --target-kl 0.02 --ent 0.003 --stage 2 --stage-steps 6000000 --ckdir $CK --bc-coef 0.5 --bc-decay 20000000 $extra 2>&1 | tee -a $CK/train.out
+    --epochs 1 --lr 5e-5 --target-kl 0.02 --ent 0.003 --stage 2 --stage-steps 6000000 --ckdir $CK --bc-coef ${BC_COEF:-0} --bc-decay 20000000 $extra 2>&1 | tee -a $CK/train.out
 }
 
 case "$PHASE" in
