@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--episodes", type=int, default=2)
     ap.add_argument("--ticks", type=int, default=4200)
     ap.add_argument("--record", default=None)
+    ap.add_argument("--weights", default=None, help="checkpoint to load (default: submission/weights/doomnet.pt)")
     a = ap.parse_args()
     _hires_timer()
     from doom_env import make_env
@@ -81,6 +82,12 @@ def main():
         print(ascii_map(L))
     env = make_env(wad, a.map, episode_ticks=a.ticks, render_buffers=True)
     agent = DoomAgent(env.observation_space, env.action_space, "cpu")
+    if a.weights:
+        import torch
+
+        ck = torch.load(a.weights, map_location="cpu", weights_only=False)
+        agent.net.load_state_dict(ck["model"] if "model" in ck else ck)
+        print(f"loaded {a.weights} (step {ck.get('step', '?')})")
     W, H = 160 * SCALE, 120 * SCALE
     writer = None
     if a.record:
