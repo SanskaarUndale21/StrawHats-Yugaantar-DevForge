@@ -176,7 +176,7 @@ class Teacher:
         # level ends at the exit. It is taken when staying is the bigger risk (set in act) or when there
         # is just enough time left for the walk back, and otherwise only once nothing else is left to do.
         exit_ok = self.exit is not None and self.exit in dist and self.seen_front[self.exit]
-        if exit_ok and (self.leave_now or self.steps_left < dist[self.exit] * 3.0 * 1.8):
+        if exit_ok and (self.leave_now or self.steps_left < dist[self.exit] * 3.0 * 2.5):
             self.leave_now = True
             return self._path(prev, self.exit, start), "exit"
         need = {ch for r in range(self.h) for c in range(self.w)
@@ -252,7 +252,7 @@ class Teacher:
         health = vit[0]
 
         self.steps_left = (ps["episode_ticks"] - ps["tic"]) / 4.0
-        if health < 35 or ps["tic"] > 0.55 * ps["episode_ticks"]:
+        if health < 35 or ps["tic"] > 0.40 * ps["episode_ticks"]:
             self.leave_now = True
         dmg = ps["damage_taken"]
         hurt = self.prev_damage is not None and dmg > self.prev_damage

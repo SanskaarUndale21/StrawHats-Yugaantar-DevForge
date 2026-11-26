@@ -265,8 +265,16 @@ class _Slot:
             label = buttons_to_choice(tb)
             if self.rng.random() < float(self.beta_val.value):
                 buttons = tb
+        # what the player was looking at when it chose this action (for the movement-quality rewards)
+        e = self.obs["visible_entities"]
+        et = np.asarray(e["entity_type"])[np.asarray(e["mask"]).astype(bool)]
+        hit, rd = np.asarray(self.obs["rays"]["hit_type"]), np.asarray(self.obs["rays"]["distance"])
+        front = [62, 63, 0, 1, 2]
+        ctx = dict(enemy_visible=bool(((et >= 1) & (et <= 3)).any()),
+                   door_ahead=bool((((hit[front] == 2) | (hit[front] == 3)) & (rd[front] < 0.15)).any()))
         obs, _, term, trunc, info = self.cur.step(buttons)
         ps = priv(self.cur)
+        ps.update(ctx)
         r = self.shaper(ps, buttons)
         self.ret += r
         self.len += 1

@@ -302,6 +302,8 @@ def main():
                        flips100=100 * np.sum([e.get("flips", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        idle=np.sum([e.get("idle", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
                        revisits=np.mean([e.get("revisits", 0) for e in E]),
+                       blocked=np.sum([e.get("blocked", 0) for e in E]) / max(np.sum([e["len"] for e in E]), 1),
+                       use_waste=np.mean([e.get("use_waste", 0) for e in E]),
                        **{f"exit_{k}": float(np.mean(kind_hist[k])) if kind_hist[k] else 0.0 for k in KINDS},
                        **{f"mix_{k}": float(kind_w[i]) if kind_w is not None else 0.0 for i, k in enumerate(KINDS)},
                        lag=R["lag"], t_wait=t_wait, t_upd=t_upd, **{k: float(np.mean(v)) for k, v in stats.items()})

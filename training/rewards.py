@@ -128,7 +128,11 @@ class RewardShaper:
              # walking properly: reversing a turn or forward/back costs, and so does standing around
              # (measured on the copied policy: 12 left-right and 6.7 forward-back reversals per 100
              # steps, idle on 26-29% of steps)
-             turn_flip=0.004, move_flip=0.004, idle=0.001,
+             # (first values 0.004 / 0.004 / 0.001 were about 3% of an episode's return and changed
+             # nothing; measured afterwards: 18% of all steps spent at a door, standing still on 70%
+             # of them with 14 USE presses per 100 steps; 17 turn reversals per 100 steps while
+             # walking; standing still on 46% of the steps with an enemy in view)
+             turn_flip=0.02, move_flip=0.02, idle=0.004, idle_busy=0.008, blocked=0.004, use_waste=0.03,
              # paid per 64-unit cell of true walking distance gained toward the next objective (and
              # taken back when it is lost again, so walking in circles earns exactly nothing)
              progress=0.06)
@@ -151,8 +155,11 @@ class RewardShaper:
         self.door_lock = dl
         self.opened = set()
         self.stats = dict(kills=0, keys=0, doors=0, unlocks=0, cells=1, exit=0, death=0, damage=0.0, items=0, shots=0, hits=0,
-                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0)
+                          revisits=0, progress=0.0, flips=0, idle=0, healed=0.0, blocked=0,
+                          use_waste=0)
         self.last_use = 0
+        self.since_use = 1000
+        self.px, self.py = ps["x"], ps["y"]
         self.health = ps["health"]
         self.last_turn = self.last_move = 0
 
@@ -202,9 +209,18 @@ class RewardShaper:
             r -= W["move_flip"]
             st["flips"] += 1
         self.last_turn, self.last_move = turn or self.last_turn, move or self.last_move
-        if not (action[0] or action[1] or action[2] or action[3] or action[6]):
-            r -= W["idle"]
+        pressing = bool(action[0] or action[1] or action[2] or action[3])
+        if not pressing:  # keep moving: more so in a fight (dodge) and at a door (go through it)
+            r -= W["idle_busy"] if (ps.get("enemy_visible") or ps.get("door_ahead")) else W["idle"]
             st["idle"] += 1
+        elif math.hypot(ps["x"] - self.px, ps["y"] - self.py) < 3.0:
+            r -= W["blocked"]  # pushing into a wall, a door or a monster and going nowhere
+            st["blocked"] += 1
+        self.px, self.py = ps["x"], ps["y"]
+        if action[7] and (not ps.get("door_ahead", True) or self.since_use < 8):
+            r -= W["use_waste"]  # USE with no door in front, or again while the door is still moving
+            st["use_waste"] += 1
+        self.since_use = 0 if action[7] else self.since_use + 1
         self._ps = ps
         if self.nav is not None and not ps["finished"]:
             cell = self.nav.cell(ps["x"], ps["y"])
@@ -269,8 +285,8 @@ class RewardShaper:
             left = (ps["episode_ticks"] - ps["tic"]) / 4.0  # decision steps left
             d = self.nav.exit_distance(cell, held)
             done = ps["kills"] - self.kills0 >= self.nav.n_monsters and len(self.cells) >= 0.85 * len(self.nav.area)
-            self._leave = bool(done or ps["health"] < 35 or ps["tic"] > 0.55 * ps["episode_ticks"]
-                               or (d is not None and left < d * 3.0 * 1.8))
+            self._leave = bool(done or ps["health"] < 35 or ps["tic"] > 0.40 * ps["episode_ticks"]
+                               or (d is not None and left < d * 3.0 * 2.5))
         return self._leave
 
     # ------------------------------------------------------------------ training-only side information

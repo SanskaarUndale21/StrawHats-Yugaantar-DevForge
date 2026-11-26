@@ -29,6 +29,7 @@ distill() {
 rl() {
   local extra=""
   if [ -f $CK/rl_done_init ] && [ -f $CK/latest.pt ]; then extra="--resume --critic-warmup 40";
+  elif [ -f $CK/restart_from.pt ]; then extra="--init $CK/restart_from.pt --critic-warmup 40"; touch $CK/rl_done_init;
   elif [ -f $CK/student.pt ]; then extra="--init $CK/student.pt --critic-warmup 150"; touch $CK/rl_done_init;
   elif [ -f $CK/latest.pt ]; then extra="--resume"; touch $CK/rl_done_init; fi
   # a fresh RL phase after distillation must not resume the old pre-distillation checkpoint
