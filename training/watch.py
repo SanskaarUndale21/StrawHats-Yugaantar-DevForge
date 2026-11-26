@@ -257,6 +257,31 @@ def _fit_screen(view):
     return view
 
 
+OUTCOME_TEXT = {"exit": "COMPLETED", "dead": "DIED", "time up": "TIME RAN OUT"}
+
+
+def _card(lines, w, h):
+    """A dark full-window card with centred text lines: [(text, font scale, BGR colour), ...]."""
+    img = np.full((h, w, 3), 18, np.uint8)
+    sizes = [cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, s, 2)[0] for t, s, _ in lines]
+    total = sum(sz[1] + 34 for sz in sizes)
+    y = (h - total) // 2
+    for (t, s, col), sz in zip(lines, sizes):
+        y += sz[1]
+        cv2.putText(img, t, ((w - sz[0]) // 2, y), cv2.FONT_HERSHEY_SIMPLEX, s, col, 2, cv2.LINE_AA)
+        y += 34
+    return img
+
+
+def _show_card(card, seconds):
+    """Show a card for `seconds`; returns True if the viewer pressed q / Esc."""
+    for _ in range(int(seconds * 10)):
+        cv2.imshow("StrawHats DoomAgent", _fit_screen(card))
+        if cv2.waitKey(100) & 0xFF in (ord("q"), 27):
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wad", default=None)
@@ -268,6 +293,10 @@ def main():
     ap.add_argument("--record", default=None)
     ap.add_argument("--lowres", action="store_true", help="show the raw 160x120 evaluation frame")
     ap.add_argument("--tour", action="store_true", help="play benchmark tiers 1-4 one after another")
+    ap.add_argument("--tier", type=int, default=0, help="play fresh levels of this benchmark tier (1-4) one after another, forever")
+    ap.add_argument("--tour-win", action="store_true", help="tiers 1-4 in order; each tier replays fresh levels until the agent reaches the exit (attempts are counted and shown)")
+    ap.add_argument("--max-attempts", type=int, default=15, help="with --tour-win: give up on a tier after this many attempts")
+    ap.add_argument("--time-scale", type=float, default=1.0, help="multiply every level's time limit (viewer only; the official benchmark uses 1.0). With 3, a player that is still alive keeps playing 3x longer before 'time up'")
     ap.add_argument("--truth", action="store_true", help="debug: draw the real level faintly under the agent's map")
     ap.add_argument("--live", action="store_true", help="play fresh random levels forever, reloading --live-weights "
                     "whenever that file changes (training/aws/live_sync.sh keeps it fresh from the cloud box)")
@@ -278,6 +307,7 @@ def main():
     from doom_env import make_env
 
     levels = []  # (wad, map, tags, layout, ticks)
+    results = []  # (level label, outcome) of the games played so far (filled in by the game loop)
     if a.live:
         from evaluate import TIER_KIND, _make_level
 
@@ -289,6 +319,29 @@ def main():
                 yield wad, name, [f"tier {tier}", TIER_KIND[tier]], L, T
 
         levels = endless()
+    elif a.tour_win:  # tiers 1-4; a tier is replayed on a fresh level until the agent reaches the exit
+        from evaluate import TIER_KIND, _make_level
+
+        def win_tour():
+            seed = a.seed
+            for tier in (1, 2, 3, 4):
+                for attempt in range(1, a.max_attempts + 1):
+                    wad, name, L, T = _make_level(("gen", tier, seed))
+                    seed += 1
+                    yield wad, name, [f"tier {tier}", TIER_KIND[tier], f"attempt {attempt}"], L, T
+                    if results and results[-1][1] == "exit":  # the loop appended this game's outcome before asking for the next level
+                        break
+
+        levels = win_tour()
+    elif a.tier:  # endless fresh levels of one benchmark tier, a different seed each time
+        from evaluate import TIER_KIND, _make_level
+
+        def endless_tier():
+            for k in range(10 ** 6):
+                wad, name, L, T = _make_level(("gen", a.tier, a.seed + k))
+                yield wad, name, [f"tier {a.tier}", TIER_KIND[a.tier]], L, T
+
+        levels = endless_tier()
     elif a.tour:  # the benchmark tiers one after another, a different map each time
         from evaluate import TIER_KIND, _make_level
 
@@ -309,13 +362,21 @@ def main():
         _hires()
     from metrics import EpisodeMetrics
 
-    total = "" if a.live else f"/{len(levels)}"
+    total = "" if (a.live or a.tier or a.tour_win) else f"/{len(levels)}"
     live_mtime, live_step = 0.0, "?"
     agent, writer, quit_ = None, None, False
     realtime, paused = True, False
     names = ["Forward", "Back", "Strafe left", "Strafe right", "Turn left", "Turn right", "Fire", "Use", "Next weapon"]
     for ep, (wad, mapname, tags, L, ticks) in enumerate(levels):
-        env = make_env(wad, mapname, episode_ticks=ticks, render_buffers=True)
+        if ep > 0 and (a.tour or a.tier or a.tour_win):  # "Tier 1 finished -> NEXT: Tier 2" card while the next level loads
+            prev_label, prev_out = results[-1]
+            card = _card([(f"{prev_label.upper()}: {OUTCOME_TEXT.get(prev_out, prev_out).upper()}", 1.1, (200, 200, 200)),
+                          ("NEXT LEVEL", 0.8, (130, 130, 130)),
+                          (" ".join(tags).upper(), 1.6, (0, 220, 255))], W + H, H)
+            if _show_card(card, 3):
+                quit_ = True
+                break
+        env = make_env(wad, mapname, episode_ticks=int(ticks * a.time_scale), render_buffers=True)
         # no status bar or engine crosshair: the agent reads this same picture to recognise the exit
         # pad, and the scorer renders without them. A crosshair is drawn on the displayed copy only.
         if agent is None:
@@ -401,11 +462,33 @@ def main():
         print(f"game {ep + 1} [{' '.join(tags)}]: {out}  steps {t}  kills {ps['kills']}/{m['monsters']}  aim {aim} of "
               f"{m['shots']} shots  rooms {rooms} cleared {m['rooms_cleared']}/{m['rooms_hostile']}  "
               f"gun swaps {m['wpn_switches']}  keys {int(obs['vitals'][8:14].sum())}", flush=True)
+        results.append((" ".join(tags).title(), out))
         env.close()
         if quit_:
             break
     if writer is not None:
         writer.release()
+    if not quit_:  # keep the result on screen until the viewer presses q / Esc (the window used to vanish right after the last level)
+        print("all games finished - press q or Esc in the window to close", flush=True)
+        if a.tour_win and results:  # per tier: how many attempts it took to reach the exit
+            lines, ok_all = [], True
+            for t in (1, 2, 3, 4):
+                games = [o for lbl, o in results if lbl.startswith(f"Tier {t} ")]
+                done_ = bool(games) and games[-1] == "exit"
+                ok_all = ok_all and done_
+                lines.append((f"Tier {t}: " + (f"COMPLETED on attempt {len(games)}" if done_ else f"not completed in {len(games)} attempts"), 0.9, (60, 220, 60) if done_ else (80, 80, 240)))
+            lines = [("ALL 4 TIERS COMPLETED" if ok_all else "TOUR FINISHED", 1.4, (0, 220, 255))] + lines + [(f"{len(results)} games played in total", 0.7, (180, 180, 180)), ("press Q or Esc to close", 0.7, (130, 130, 130))]
+            card = _card(lines, W + H, H)
+            while not _show_card(card, 1):
+                pass
+        elif a.tour and results:  # summary card for the 4 tiers
+            lines = [("ALL 4 TIERS FINISHED", 1.4, (0, 220, 255))] + [(f"{lbl}: {OUTCOME_TEXT.get(o, o)}", 0.9, (60, 220, 60) if o == "exit" else (80, 80, 240)) for lbl, o in results] + [("press Q or Esc to close", 0.7, (130, 130, 130))]
+            card = _card(lines, W + H, H)
+            while not _show_card(card, 1):
+                pass
+        else:
+            while cv2.waitKey(100) & 0xFF not in (ord("q"), 27):
+                pass
     cv2.destroyAllWindows()
 
 
