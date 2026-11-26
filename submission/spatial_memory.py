@@ -32,7 +32,6 @@ DEAD_TICS = 7  # the engine ignores input for the first 7 tics of an episode (me
 # contact correction: while touching a wall or a monster the engine still reports velocity, so the
 # step is re-estimated by sliding this scan onto the previous one (point-to-line fit)
 CONTACT = 28.0   # map units; the player radius is 16
-MELEE_RANGE = 110.0
 FIT_PRIOR = 1.0  # weight of the odometry guess; it decides the direction the walls leave free
 
 FINE, COARSE = 64.0, 256.0
@@ -76,6 +75,7 @@ class SpatialMemory:
         self.ppos = (0.0, 0.0)
         self.pcontact = False
         self.pweapon = 0
+        self.melee_cd = 0
         self.prev_vel = np.zeros(2)
         self.prev_action = np.zeros(9, np.float32)
         self.step = 0
@@ -157,7 +157,7 @@ class SpatialMemory:
         cf = cost(fine)
         k = int(np.argmin(cf))
         c0 = float(cost(np.zeros(1))[0])
-        if abs(fine[k]) < math.radians(0.6) or cf[k] > 6.0 or cf[k] > 0.5 * c0:
+        if abs(fine[k]) < math.radians(0.3) or cf[k] > 6.0 or cf[k] > c0 - 0.4:
             return 0.0
         return float(fine[k])
 
@@ -203,9 +203,11 @@ class SpatialMemory:
 
         static = ((hit == RAY_WALL) | (hit == RAY_DOOR) | (hit == RAY_LOCK)) & (dist < 0.97)
         # a melee hit (fist, chainsaw) snaps the player's view onto the target: re-find the heading
-        melee = int(vit[2]) == 1 or self.pweapon == 1
+        if (int(vit[2]) == 1 or self.pweapon == 1) and action is not None and action[6]:
+            self.melee_cd = 4  # the swing lands a few tics after the press
         self.pweapon = int(vit[2])
-        if melee and self.pscan is not None and bool((dunits[hit == RAY_ENEMY] < MELEE_RANGE).any()):
+        self.melee_cd -= 1
+        if self.melee_cd >= 0 and self.pscan is not None:
             dth = self._refit_heading(dunits[static], ang[static], np.array([self.x - self.ppos[0], self.y - self.ppos[1]]))
             if dth:
                 self.th = (self.th + dth) % (2 * math.pi)
