@@ -17,15 +17,18 @@ fi
 
 TYPE="${TYPE:-c7i.8xlarge}"
 MARKET="${MARKET:-spot}"
+MAXPRICE="${MAXPRICE:-1.00}"      # spot: never pay more than this per hour
+MAX_HOURS="${MAX_HOURS:-16}"      # instance terminates itself after this, no matter what
+UPLOAD="${UPLOAD:-latest.pt student.pt distill.pt}"
 PHASE="${PHASE:-full}"
 REGION="${REGION:-$(aws configure get region || echo us-east-1)}"
-KEY="${KEY:-doom-train}"
+KEY="${KEY:-doom-train-$AWS_PROFILE-$REGION}"
 SG_NAME="doom-train-ssh"
 KEYFILE="$HOME/.ssh/$KEY.pem"
 export AWS_DEFAULT_REGION="$REGION"
 STATE="training/aws/.instance-${NAME:-doom-train}"   # gitignored: instance id / ip
 
-echo "name=${NAME:-doom-train} region=$REGION type=$TYPE market=$MARKET phase=$PHASE seed=${SEED:-1}"
+echo "profile=$AWS_PROFILE name=${NAME:-doom-train} region=$REGION type=$TYPE market=$MARKET maxprice=$MAXPRICE max_hours=$MAX_HOURS phase=$PHASE seed=${SEED:-1}"
 aws sts get-caller-identity --query Account --output text >/dev/null
 
 # key pair
@@ -48,9 +51,9 @@ AMI=$(aws ssm get-parameters --names /aws/service/canonical/ubuntu/server/24.04/
       --query 'Parameters[0].Value' --output text)
 MKT=()
 if [ "$MARKET" = "spot" ]; then
-  MKT=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+  MKT=(--instance-market-options "MarketType=spot,SpotOptions={MaxPrice=$MAXPRICE,SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}")
 fi
-ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" \
+ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" --instance-initiated-shutdown-behavior terminate \
      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${NAME:-doom-train}}]" "${MKT[@]}" \
      --query 'Instances[0].InstanceId' --output text)
@@ -61,11 +64,14 @@ printf 'ID=%s\nIP=%s\nREGION=%s\nKEYFILE=%s\n' "$ID" "$IP" "$REGION" "$KEYFILE" 
 SSH="ssh -i $KEYFILE -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$IP"
 echo "waiting for ssh on $IP ..."
 until $SSH true 2>/dev/null; do sleep 5; done
+# hard stop: OS shutdown -> instance terminates (shutdown behaviour = terminate)
+$SSH "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1 || true"
+echo "self-terminate timer: $MAX_HOURS h"
 
 scp -i "$KEYFILE" -o StrictHostKeyChecking=no training/aws/setup_instance.sh ubuntu@$IP:~/
 $SSH "bash ~/setup_instance.sh"
 # carry local progress over (whatever exists)
-for f in latest.pt student.pt distill.pt; do
+for f in $UPLOAD; do
   if [ -f "training/checkpoints/$f" ]; then
     scp -i "$KEYFILE" -o StrictHostKeyChecking=no "training/checkpoints/$f" ubuntu@$IP:~/doom/training/checkpoints/
   fi

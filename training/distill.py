@@ -64,7 +64,7 @@ def main():
     if dev.type == "cpu":  # cloud CPU box: leave most cores to the env workers
         import os
 
-        torch.set_num_threads(max(2, (os.cpu_count() or 8) // 4))
+        torch.set_num_threads(int(os.environ.get("LEARNER_THREADS", max(2, (os.cpu_count() or 8) // 4))))
     ckdir = Path(a.ckdir) if a.ckdir else ROOT / "training" / "checkpoints"
     ckdir.mkdir(parents=True, exist_ok=True)
     net = DoomNet().to(dev)
