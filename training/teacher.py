@@ -69,6 +69,7 @@ class Teacher:
         self.taken = set()
         self.path = []
         self.goal = None
+        self.target = None
         self.replan = 0
         self.hist = deque(maxlen=10)
         self.escape = 0
@@ -180,8 +181,18 @@ class Teacher:
             return self._path(prev, g, start), "key"
         fr = {rc: gain for rc, gain in self._frontier_gain().items() if rc in dist and rc != start}
         if fr:
-            g = min(fr, key=lambda rc: dist[rc] - 0.35 * fr[rc])
+            # commit: keep walking to the frontier already chosen while it is still a frontier, so the
+            # route does not flip between two equally good options every replan
+            g = self.target if self.target in fr else min(fr, key=lambda rc: dist[rc] - 0.35 * fr[rc])
+            self.target = g
             return self._path(prev, g, start), "explore"
+        # everything is seen: sweep the floor not walked on yet (new areas still score, and it brings
+        # an exit that was only glimpsed sideways into view), nearest first, same commitment
+        left = [rc for rc in dist if rc not in self.taken and rc != start and self.grid[rc[0]][rc[1]] not in "DBYR"]
+        if left:
+            g = self.target if self.target in left else min(left, key=dist.get)
+            self.target = g
+            return self._path(prev, g, start), "sweep"
         return None, None
 
     def _clear(self, x0, y0, x1, y1, radius=18.0):
@@ -380,8 +391,7 @@ class Teacher:
             self.path = self.path or []
             self.replan = 8
         if not self.path:
-            b[0] = 1
-            b[4] = 1
+            b[4] = 1  # nothing left to do anywhere: look around on the spot (never walk in circles)
             return self._finish(b)
         nxt = self.path[0]
         door_next = self.grid[nxt[0]][nxt[1]] in "DBYR"
