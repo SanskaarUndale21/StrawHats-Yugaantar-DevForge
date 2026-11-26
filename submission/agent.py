@@ -22,7 +22,9 @@ from model import DoomNet, load_compatible, obs_to_torch, split_logits, to_butto
 from spatial_memory import SpatialMemory  # noqa: E402
 
 
-TEMPERATURE = 1.0  # < 1 makes the sampled actions less jittery; chosen on the held-out benchmark
+# Sampling temperature, chosen on 112 held-out levels with the same weights: 1.0 scored 190 with 23
+# left-right turn reversals per 100 steps, 0.35 scored 218 with 11 (the scripted teacher: 9).
+TEMPERATURE = 0.35
 
 
 class DoomAgent:

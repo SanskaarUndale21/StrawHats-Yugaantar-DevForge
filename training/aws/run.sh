@@ -9,8 +9,10 @@ DSTEPS="${2:-8000000}"
 RSTEPS="${3:-150000000}"
 SEED="${4:-1}"
 CORES=$(nproc)
-WORKERS=$(( CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES) ))
-export LEARNER_THREADS=$(( CORES > 16 ? 12 : 1 ))
+# measured on 64 cores: with 50 actors and 12 learner threads the learner was the bottleneck
+# (3.6 s per update against 0.1 s waiting for data), so the learner gets a bigger share
+WORKERS=$(( CORES > 32 ? CORES - 24 : (CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES)) ))
+export LEARNER_THREADS=$(( CORES > 32 ? 20 : (CORES > 16 ? 12 : 1) ))
 CK=training/checkpoints
 echo "cores=$CORES workers=$WORKERS phase=$PHASE"
 
