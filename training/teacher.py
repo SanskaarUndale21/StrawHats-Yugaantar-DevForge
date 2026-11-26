@@ -70,6 +70,8 @@ class Teacher:
         self.path = []
         self.goal = None
         self.target = None
+        self.leave_now = False
+        self.steps_left = 1e9
         self.replan = 0
         self.hist = deque(maxlen=10)
         self.escape = 0
@@ -170,7 +172,12 @@ class Teacher:
 
     def _plan(self, start, vit):
         prev, dist = self._bfs_all(start, vit)
-        if self.exit is not None and self.exit in dist and self.seen_front[self.exit]:
+        # the exit is remembered, not taken on sight: kills, new areas, keys and doors all score and the
+        # level ends at the exit. It is taken when staying is the bigger risk (set in act) or when there
+        # is just enough time left for the walk back, and otherwise only once nothing else is left to do.
+        exit_ok = self.exit is not None and self.exit in dist and self.seen_front[self.exit]
+        if exit_ok and (self.leave_now or self.steps_left < dist[self.exit] * 3.0 * 1.8):
+            self.leave_now = True
             return self._path(prev, self.exit, start), "exit"
         need = {ch for r in range(self.h) for c in range(self.w)
                 if (ch := self.grid[r][c]) in LOCK_KEYS and self.seen[r, c] and not self._has_key(vit, ch)}
@@ -193,6 +200,8 @@ class Teacher:
             g = self.target if self.target in left else min(left, key=dist.get)
             self.target = g
             return self._path(prev, g, start), "sweep"
+        if exit_ok:  # everything seen and walked: now leave
+            return self._path(prev, self.exit, start), "exit"
         return None, None
 
     def _clear(self, x0, y0, x1, y1, radius=18.0):
@@ -242,6 +251,9 @@ class Teacher:
         self.wpn_cool -= 1
         health = vit[0]
 
+        self.steps_left = (ps["episode_ticks"] - ps["tic"]) / 4.0
+        if health < 35 or ps["tic"] > 0.55 * ps["episode_ticks"]:
+            self.leave_now = True
         dmg = ps["damage_taken"]
         hurt = self.prev_damage is not None and dmg > self.prev_damage
         self.prev_damage = dmg
