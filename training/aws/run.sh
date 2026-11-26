@@ -7,8 +7,9 @@ cd "$HOME/doom"
 PHASE="${1:-full}"
 DSTEPS="${2:-8000000}"
 RSTEPS="${3:-150000000}"
+SEED="${4:-1}"
 CORES=$(nproc)
-WORKERS=$(( CORES > 4 ? CORES - 2 : 2 ))
+WORKERS=$(( CORES > 4 ? CORES - 2 : CORES ))
 CK=training/checkpoints
 echo "cores=$CORES workers=$WORKERS phase=$PHASE"
 
@@ -16,7 +17,7 @@ distill() {
   local extra=""
   if [ -f $CK/distill.pt ]; then extra="--resume";
   elif [ -f $CK/latest.pt ]; then extra="--init $CK/latest.pt"; fi
-  uv run python -u training/distill.py --workers $WORKERS --envs-per-worker 2 --steps $DSTEPS $extra 2>&1 | tee -a $CK/distill.out
+  uv run python -u training/distill.py --workers $WORKERS --envs-per-worker 2 --steps $DSTEPS --seed $SEED $extra 2>&1 | tee -a $CK/distill.out
 }
 
 rl() {
@@ -26,7 +27,7 @@ rl() {
   elif [ -f $CK/latest.pt ]; then extra="--resume"; touch $CK/rl_done_init; fi
   # a fresh RL phase after distillation must not resume the old pre-distillation checkpoint
   if [[ "$extra" == --init* ]] && [ -f $CK/latest.pt ]; then mv $CK/latest.pt $CK/pre_distill_latest.pt; fi
-  uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS $extra 2>&1 | tee -a $CK/train.out
+  uv run python -u training/train.py --workers $WORKERS --envs-per-worker 2 --steps $RSTEPS --seed $SEED $extra 2>&1 | tee -a $CK/train.out
 }
 
 case "$PHASE" in

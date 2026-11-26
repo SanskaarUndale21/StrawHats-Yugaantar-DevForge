@@ -23,9 +23,9 @@ KEY="${KEY:-doom-train}"
 SG_NAME="doom-train-ssh"
 KEYFILE="$HOME/.ssh/$KEY.pem"
 export AWS_DEFAULT_REGION="$REGION"
-STATE=training/aws/.instance   # gitignored: holds the instance id / ip
+STATE="training/aws/.instance-${NAME:-doom-train}"   # gitignored: instance id / ip
 
-echo "region=$REGION type=$TYPE market=$MARKET phase=$PHASE"
+echo "name=${NAME:-doom-train} region=$REGION type=$TYPE market=$MARKET phase=$PHASE seed=${SEED:-1}"
 aws sts get-caller-identity --query Account --output text >/dev/null
 
 # key pair
@@ -52,7 +52,7 @@ if [ "$MARKET" = "spot" ]; then
 fi
 ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" \
      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
-     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=doom-train}]' "${MKT[@]}" \
+     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${NAME:-doom-train}}]' "${MKT[@]}" \
      --query 'Instances[0].InstanceId' --output text)
 echo "instance $ID starting..."
 aws ec2 wait instance-running --instance-ids "$ID"
@@ -70,7 +70,7 @@ for f in latest.pt student.pt distill.pt; do
     scp -i "$KEYFILE" -o StrictHostKeyChecking=no "training/checkpoints/$f" ubuntu@$IP:~/doom/training/checkpoints/
   fi
 done
-$SSH "tmux new-session -d -s train 'bash ~/doom/training/aws/run.sh $PHASE; bash'"
+$SSH "tmux new-session -d -s train 'bash ~/doom/training/aws/run.sh $PHASE 8000000 150000000 ${SEED:-1}; bash'"
 echo
 echo "training started on $TYPE ($MARKET)  id=$ID  ip=$IP"
 echo "  watch:   $SSH -t tmux attach -t train      (detach: Ctrl-b d)"
