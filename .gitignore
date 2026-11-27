@@ -228,7 +228,6 @@ _vizdoom.ini
 # training artifacts
 training/checkpoints/
 training/runs/
-.claude/
 training/aws/.instance*
 env/**/__pycache__/
 _vizdoom/
