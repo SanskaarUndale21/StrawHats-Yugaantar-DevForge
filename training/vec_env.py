@@ -108,6 +108,9 @@ def reveal_layout(mem, L, ps) -> None:
     mem.reveal(*(to_mem(out[k]) for k in ("free", "wall", "door", "lock", "key")))
 
 
+PREFIX_P = float(os.environ.get("PREFIX_P", "0"))  # share of episodes that start mid-level
+
+
 class _Slot:
     """One environment. Levels live in a 32-map PWAD; switching maps inside the running engine costs
     ~30 ms, while creating a new DoomGame costs ~1 s, so a fresh WAD is only built every few dozen
@@ -234,7 +237,45 @@ class _Slot:
             # already drawn in memory; it fades out so the later part is all unknown maps
             if int(self.mode_val.value) == 2 and self.rng.random() < (float(self.beta_val.value) - 0.3) / 0.5:
                 reveal_layout(self.mem, self.layout, priv(self.cur))
-        return obs, self._features(obs, None)
+        buttons = self._prefix() if self.layout is not None and self.rng.random() < PREFIX_P else None
+        if buttons is False:  # the level ended while the teacher was driving: take another one
+            return self.reset()
+        return self.obs, self._features(self.obs, buttons)
+
+    def _ctx(self):
+        """What the player is looking at right now (for the movement-quality rewards)."""
+        e = self.obs["visible_entities"]
+        et = np.asarray(e["entity_type"])[np.asarray(e["mask"]).astype(bool)]
+        hit, rd = np.asarray(self.obs["rays"]["hit_type"]), np.asarray(self.obs["rays"]["distance"])
+        front = [62, 63, 0, 1, 2]
+        return dict(enemy_visible=bool(((et >= 1) & (et <= 3)).any()),
+                    door_ahead=bool((((hit[front] == 2) | (hit[front] == 3)) & (rd[front] < 0.15)).any()))
+
+    def _prefix(self):
+        """Mid-level start. A long level is a chain (first fight, key, locked door, more fights, exit)
+        and a policy that usually dies in the first fight gets almost no practice at the rest: on 60
+        gauntlets half the deaths came in the first quarter of the game with 2 of 8 monsters killed.
+        So on a share of episodes the scripted teacher plays the first part, the agent's own memory
+        records it exactly as if the agent had walked it, and the policy takes over from there with
+        the time that is left. Training only: the teacher is never in the submission.
+        Returns the last buttons pressed, or False if the level ended during the prefix."""
+        from teacher import Teacher
+
+        t = Teacher(self.layout, seed=self.rng.randrange(1 << 30))
+        n = self.rng.randint(30, int(0.45 * self.cur.episode_ticks / 4))
+        buttons = None
+        for _ in range(n):
+            self.mem.update(self.obs, buttons)
+            buttons = t.act(self.obs, priv(self.cur))
+            ctx = self._ctx()
+            obs, _, term, trunc, _ = self.cur.step(buttons)
+            ps = priv(self.cur)
+            ps.update(ctx)
+            self.shaper(ps, buttons)
+            if term or trunc:
+                return False
+            self.obs = obs
+        return buttons
 
     def _features(self, obs, buttons):
         """Policy features plus the training-only extras: side information for the critic and the
@@ -269,13 +310,7 @@ class _Slot:
             label = buttons_to_choice(tb)
             if self.rng.random() < float(self.beta_val.value):
                 buttons = tb
-        # what the player was looking at when it chose this action (for the movement-quality rewards)
-        e = self.obs["visible_entities"]
-        et = np.asarray(e["entity_type"])[np.asarray(e["mask"]).astype(bool)]
-        hit, rd = np.asarray(self.obs["rays"]["hit_type"]), np.asarray(self.obs["rays"]["distance"])
-        front = [62, 63, 0, 1, 2]
-        ctx = dict(enemy_visible=bool(((et >= 1) & (et <= 3)).any()),
-                   door_ahead=bool((((hit[front] == 2) | (hit[front] == 3)) & (rd[front] < 0.15)).any()))
+        ctx = self._ctx()
         obs, _, term, trunc, info = self.cur.step(buttons)
         ps = priv(self.cur)
         ps.update(ctx)
