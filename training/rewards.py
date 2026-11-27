@@ -7,6 +7,7 @@ Mirrors the evaluation categories: exit (largest), progression (keys, doors, unl
 from __future__ import annotations
 
 import collections
+import os
 import math
 
 import numpy as np
@@ -156,6 +157,11 @@ class RewardShaper:
              # 2% shuffling). Half price with an enemy in view, where holding ground can be right.
              loiter=0.008,
              progress=0.06)
+    # one-run experiments without a code fork: REWARD_OVERRIDES="dmg_dealt=0.01,damage=0.035"
+    for _kv in filter(None, os.environ.get("REWARD_OVERRIDES", "").split(",")):
+        _k, _v = _kv.split("=")
+        assert _k in W, _k
+        W[_k] = float(_v)
 
     def reset(self, ps: dict, layout=None) -> None:
         self.nav = Navigator(layout) if layout is not None else None
