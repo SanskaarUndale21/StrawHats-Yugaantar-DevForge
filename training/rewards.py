@@ -331,6 +331,9 @@ class RewardShaper:
             # (112-level test 258 -> 203 over the 4M steps it was in force), and the exit is the
             # largest score item. The exit is the objective as soon as it can be reached.
             self._leave = True
+            if os.environ.get("FINISH_FIRST") == "1":  # experiment: clear the level first, unless staying is the bigger risk
+                self._leave = bool(ps["kills"] - self.kills0 >= self.nav.n_monsters or ps["health"] < 40
+                                   or ps["tic"] > 0.40 * ps["episode_ticks"])
         return self._leave
 
     # ------------------------------------------------------------------ training-only side information
