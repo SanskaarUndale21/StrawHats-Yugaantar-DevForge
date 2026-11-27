@@ -5,7 +5,7 @@ Inputs (built by spatial_memory.SpatialMemory):
   map      (18, 21, 21)   heading-aligned crops of the agent's own occupancy map at 2 scales (9 layers each)
   rgb      (3, 30, 40)    low-res colour thumbnail (uint8)
   rgb2     (3, 60, 80)    sharper colour picture for the exit and door-colour reader (uint8)
-  vec      (85,)          vitals, previous action, pointers to remembered doors, locked doors by colour, keycards, exit
+  vec      (89,)          vitals, previous action, pointers to remembered doors, locked doors by colour, keycards, exit
   ent      (32, 5) + ent_type (32,) + ent_mask (32,)   variable-size set of visible entities
 
 Modules:
@@ -32,7 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 85, 32, 12
+RAY_CH, NUM_RAYS, MAP_CH, CROP, VEC_DIM, N_ENT, N_ENT_TYPES = 9, 64, 18, 21, 89, 32, 12
 PRIV_DIM = 12  # training-only ground truth for the critic (never part of the policy's input)
 HEADS = (3, 3, 3, 2, 2, 2)  # move, strafe, turn, attack, use, weapon
 HIDDEN = 256

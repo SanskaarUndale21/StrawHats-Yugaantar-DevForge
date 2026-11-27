@@ -50,7 +50,7 @@ ENT_KEY = 9
 ENT_ITEMS = (5, 6, 7, 8)  # health, armor, ammo, weapon
 
 RAY_CH = 9
-VEC_DIM = 85
+VEC_DIM = 89
 AMMO_SCALE = np.array([200.0, 50.0, 50.0, 300.0], np.float32)
 
 _RAY_ANG = np.arange(NUM_RAYS) * (2 * math.pi / NUM_RAYS)
@@ -410,6 +410,33 @@ class SpatialMemory:
         fwd, left = (c * dx[i] + s * dy[i]) / max(d[i], 1e-6), (-s * dx[i] + c * dy[i]) / max(d[i], 1e-6)
         return [left, fwd, min(d[i] / 2048.0, 1.0), 1.0]
 
+    def _unexplored(self) -> list[float]:
+        """Pointer to the nearest place the agent has not been that leads somewhere new: a remembered
+        door it has never stood in (measured: in these levels unseen space is almost always behind a
+        door, open floor edges are rare), or known floor that touches space never seen. Straight-line
+        nearest, a read-out of the map like the other pointers: no route is planned and the policy
+        decides whether to go there."""
+        v = self.fine[C_VISIT]
+        px, py = [], []
+        for (cx, cy), (qx, qy) in self.doors.items():
+            if not any(v[(cx + a) % G_FINE, (cy + b) % G_FINE] > 0 for a in (-1, 0, 1) for b in (-1, 0, 1)):
+                px.append(qx - self.x)
+                py.append(qy - self.y)
+        ix, iy = np.nonzero((self.fine[C_FRONT] > 0) & (v == 0))
+        if len(ix):
+            gx, gy = math.floor(self.x / FINE), math.floor(self.y / FINE)
+            h = G_FINE // 2
+            px += list(((ix - gx + h) % G_FINE - h + 0.5) * FINE - (self.x - gx * FINE))
+            py += list(((iy - gy + h) % G_FINE - h + 0.5) * FINE - (self.y - gy * FINE))
+        if not px:
+            return [0.0, 0.0, 1.0, 0.0]
+        dx, dy = np.asarray(px, np.float64), np.asarray(py, np.float64)
+        d = np.hypot(dx, dy)
+        i = int(np.argmin(d))
+        c, s = math.cos(self.th), math.sin(self.th)
+        return [float((-s * dx[i] + c * dy[i]) / max(d[i], 1e-6)), float((c * dx[i] + s * dy[i]) / max(d[i], 1e-6)),
+                float(min(d[i] / 2048.0, 1.0)), 1.0]
+
     def _features(self, obs, vit, dist, hit, visited_frac, feats, etype, mask) -> dict:
         rays = np.zeros((RAY_CH, NUM_RAYS), np.float32)
         rays[0] = dist
@@ -438,6 +465,7 @@ class SpatialMemory:
             self._pointer(self.exits),
             *[p for c3 in range(3) for p in (self._pointer(self.lock_col[c3]), self._pointer(self.key_col[c3]))],
             self._pointer(self.medkits), self._pointer(self.armors),
+            self._unexplored(),
         ]).astype(np.float32)
         assert vec.shape[0] == VEC_DIM, vec.shape
 
