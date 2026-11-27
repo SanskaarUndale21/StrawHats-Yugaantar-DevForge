@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_URL="${1:-https://github.com/SanskaarUndale21/StrawHats-Yugaantar-DevForge.git}"
 BRANCH="${2:-main}"
 
+# a freshly booted image may still be running its own package updates: wait for the lock
+for i in $(seq 1 40); do sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 5; done
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git git-lfs tmux htop libgl1 libglib2.0-0 >/dev/null
 git lfs install --skip-repo >/dev/null

@@ -15,6 +15,12 @@ CORES=$(nproc)
 # threads while actors waited 0.13 s), so the learner gets nearly half the machine
 WORKERS=$(( CORES > 32 ? CORES - 34 : (CORES > 16 ? CORES - 14 : (CORES > 4 ? CORES - 2 : CORES)) ))
 export LEARNER_THREADS=$(( CORES > 32 ? 30 : (CORES > 16 ? 12 : 1) ))
+# with a GPU the update is no longer the bottleneck (it took 2.9 s of every 3 s on 30 CPU threads),
+# so nearly every core goes to the actors
+if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
+  WORKERS=$(( CORES - 6 ))
+  export LEARNER_THREADS=4
+fi
 CK=training/checkpoints
 echo "cores=$CORES workers=$WORKERS phase=$PHASE"
 

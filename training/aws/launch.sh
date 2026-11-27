@@ -47,7 +47,8 @@ if [ "$SG" = "None" ] || [ -z "$SG" ]; then
 fi
 aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$MYIP/32" >/dev/null 2>&1 || true
 
-AMI=$(aws ssm get-parameters --names /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+# AMI_SSM: set to a GPU image (NVIDIA driver preinstalled) for a box whose learner runs on a GPU
+AMI=$(aws ssm get-parameters --names "${AMI_SSM:-/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}" \
       --query 'Parameters[0].Value' --output text)
 MKT=()
 if [ "$MARKET" = "spot" ]; then
@@ -56,7 +57,7 @@ fi
 PLACE=()
 if [ -n "${AZ:-}" ]; then PLACE=(--placement "AvailabilityZone=$AZ"); fi   # pick a zone that has spot capacity
 ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY" --security-group-ids "$SG" --instance-initiated-shutdown-behavior terminate "${PLACE[@]}" \
-     --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
+     --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${DISK:-40},VolumeType=gp3,DeleteOnTermination=true}" \
      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${NAME:-doom-train}}]" "${MKT[@]}" \
      --query 'Instances[0].InstanceId' --output text)
 echo "instance $ID starting..."
