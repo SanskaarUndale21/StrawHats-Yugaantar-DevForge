@@ -38,7 +38,7 @@ from model import DoomNet, load_compatible, split_logits  # noqa: E402
 from sampler import AsyncSampler  # noqa: E402
 from vec_env import _hires_timer  # noqa: E402
 
-RND_DIM = 9 * 64 + 77
+RND_DIM = 9 * 64 + 85
 
 
 class RND(nn.Module):

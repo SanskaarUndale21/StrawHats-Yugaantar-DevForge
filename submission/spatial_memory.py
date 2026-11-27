@@ -50,7 +50,7 @@ ENT_KEY = 9
 ENT_ITEMS = (5, 6, 7, 8)  # health, armor, ammo, weapon
 
 RAY_CH = 9
-VEC_DIM = 77
+VEC_DIM = 85
 AMMO_SCALE = np.array([200.0, 50.0, 50.0, 300.0], np.float32)
 
 _RAY_ANG = np.arange(NUM_RAYS) * (2 * math.pi / NUM_RAYS)
@@ -85,6 +85,11 @@ class SpatialMemory:
         self.locks: dict[tuple[int, int], tuple[float, float]] = {}
         self.doors: dict[tuple[int, int], tuple[float, float]] = {}
         self.keys: dict[tuple[int, int], tuple[float, float]] = {}
+        # health and armour pickups seen so far. Walking over one at full health leaves it on the floor,
+        # so it is only forgotten once it has actually been taken (or is plainly gone).
+        self.medkits: dict[tuple[int, int], tuple[float, float]] = {}
+        self.armors: dict[tuple[int, int], tuple[float, float]] = {}
+        self._last_hp, self._last_ar = None, None
         self.exits: dict[tuple[int, int], tuple[float, float]] = {}
         # the observation says "locked door" and "key" but never which colour; the colour comes from
         # the network's own colour reader (see note_colors) and is remembered here per colour
@@ -315,6 +320,10 @@ class SpatialMemory:
                 if infov.any():
                     j = int(np.flatnonzero(infov)[np.argmin(d[infov])])
                     self._front_key = (float(wx[j]), float(wy[j]))
+            for store, kind in ((self.medkits, ENT_ITEMS[0]), (self.armors, ENT_ITEMS[1])):
+                for px, py in zip(wx[t == kind], wy[t == kind]):
+                    if not any(math.hypot(px - qx, py - qy) < 48.0 for qx, qy in store.values()):
+                        store[self._cell(px, py)] = (float(px), float(py))
             it = np.isin(t, ENT_ITEMS)
             if it.any():
                 self._paint(C_ITEM, wx[it], wy[it])
@@ -330,6 +339,13 @@ class SpatialMemory:
         self.fine[C_ITEM, cx, cy] = 0.0
         self.fine[C_KEY, cx, cy] = 0.0
         self.keys.pop((cx, cy), None)
+        for store, now, last in ((self.medkits, float(vit[0]), self._last_hp), (self.armors, float(vit[1]), self._last_ar)):
+            near = [k for k, (qx, qy) in store.items() if math.hypot(qx - self.x, qy - self.y) < 40.0]
+            # standing on it: it was taken if the vital went up, and it is gone if the vital has room and did not
+            if near and ((last is not None and now > last) or now < 100.0):
+                for k in near:
+                    del store[k]
+        self._last_hp, self._last_ar = float(vit[0]), float(vit[1])
         for c3 in range(3):
             self.key_col[c3].pop((cx, cy), None)
             if vit[8 + c3] > 0 or vit[11 + c3] > 0:
@@ -421,6 +437,7 @@ class SpatialMemory:
              float(any(vit[8:14] > 0))],
             self._pointer(self.exits),
             *[p for c3 in range(3) for p in (self._pointer(self.lock_col[c3]), self._pointer(self.key_col[c3]))],
+            self._pointer(self.medkits), self._pointer(self.armors),
         ]).astype(np.float32)
         assert vec.shape[0] == VEC_DIM, vec.shape
 
